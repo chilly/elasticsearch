@@ -19,6 +19,7 @@
 
 package org.elasticsearch.action.support.master;
 
+import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.ActionListenerResponseHandler;
 import org.elasticsearch.action.ActionResponse;
@@ -58,7 +59,15 @@ public abstract class TransportMasterNodeAction<Request extends MasterNodeReques
     protected TransportMasterNodeAction(Settings settings, String actionName, TransportService transportService,
                                         ClusterService clusterService, ThreadPool threadPool, ActionFilters actionFilters,
                                         IndexNameExpressionResolver indexNameExpressionResolver, Supplier<Request> request) {
-        super(settings, actionName, threadPool, transportService, actionFilters, indexNameExpressionResolver, request);
+        this(settings, actionName, true, transportService, clusterService, threadPool, actionFilters, indexNameExpressionResolver, request);
+    }
+
+    protected TransportMasterNodeAction(Settings settings, String actionName, boolean canTripCircuitBreaker,
+                                        TransportService transportService, ClusterService clusterService, ThreadPool threadPool,
+                                        ActionFilters actionFilters, IndexNameExpressionResolver indexNameExpressionResolver,
+                                        Supplier<Request> request) {
+        super(settings, actionName, canTripCircuitBreaker, threadPool, transportService, actionFilters, indexNameExpressionResolver,
+            request);
         this.transportService = transportService;
         this.clusterService = clusterService;
         this.executor = executor();
@@ -144,10 +153,10 @@ public abstract class TransportMasterNodeAction<Request extends MasterNodeReques
                         }
 
                         @Override
-                        public void onFailure(Throwable t) {
+                        public void onFailure(Exception t) {
                             if (t instanceof Discovery.FailedToCommitClusterStateException
                                     || (t instanceof NotMasterException)) {
-                                logger.debug("master could not publish cluster state or stepped down before publishing action [{}], scheduling a retry", t, actionName);
+                                logger.debug((org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage("master could not publish cluster state or stepped down before publishing action [{}], scheduling a retry", actionName), t);
                                 retry(t, MasterNodeChangePredicate.INSTANCE);
                             } else {
                                 listener.onFailure(t);
@@ -168,12 +177,7 @@ public abstract class TransportMasterNodeAction<Request extends MasterNodeReques
                     retry(null, MasterNodeChangePredicate.INSTANCE);
                 } else {
                     taskManager.registerChildTask(task, nodes.getMasterNode().getId());
-                    transportService.sendRequest(nodes.getMasterNode(), actionName, request, new ActionListenerResponseHandler<Response>(listener) {
-                        @Override
-                        public Response newInstance() {
-                            return newResponse();
-                        }
-
+                    transportService.sendRequest(nodes.getMasterNode(), actionName, request, new ActionListenerResponseHandler<Response>(listener, TransportMasterNodeAction.this::newResponse) {
                         @Override
                         public void handleException(final TransportException exp) {
                             Throwable cause = exp.unwrapCause();
@@ -206,7 +210,7 @@ public abstract class TransportMasterNodeAction<Request extends MasterNodeReques
 
                     @Override
                     public void onTimeout(TimeValue timeout) {
-                        logger.debug("timed out while retrying [{}] after failure (timeout [{}])", failure, actionName, timeout);
+                        logger.debug((org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage("timed out while retrying [{}] after failure (timeout [{}])", actionName, timeout), failure);
                         listener.onFailure(new MasterNotDiscoveredException(failure));
                     }
                 }, changePredicate

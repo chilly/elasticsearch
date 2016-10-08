@@ -37,12 +37,19 @@ Vagrant.configure(2) do |config|
       [ -f /usr/share/java/jayatanaag.jar ] || install jayatana
     SHELL
   end
+  config.vm.define "ubuntu-1604" do |config|
+    config.vm.box = "elastic/ubuntu-16.04-x86_64"
+    ubuntu_common config, extra: <<-SHELL
+      # Install Jayatana so we can work around it being present.
+      [ -f /usr/share/java/jayatanaag.jar ] || install jayatana
+    SHELL
+  end
   # Wheezy's backports don't contain Openjdk 8 and the backflips required to
   # get the sun jdk on there just aren't worth it. We have jessie for testing
   # debian and it works fine.
   config.vm.define "debian-8" do |config|
     config.vm.box = "elastic/debian-8-x86_64"
-    deb_common config, 'echo deb http://http.debian.net/debian jessie-backports main > /etc/apt/sources.list.d/backports.list', 'backports'
+    deb_common config, 'echo deb http://cloudfront.debian.net/debian jessie-backports main > /etc/apt/sources.list.d/backports.list', 'backports'
   end
   config.vm.define "centos-6" do |config|
     config.vm.box = "elastic/centos-6-x86_64"
@@ -60,8 +67,8 @@ Vagrant.configure(2) do |config|
     config.vm.box = "elastic/oraclelinux-7-x86_64"
     rpm_common config
   end
-  config.vm.define "fedora-22" do |config|
-    config.vm.box = "elastic/fedora-22-x86_64"
+  config.vm.define "fedora-24" do |config|
+    config.vm.box = "elastic/fedora-24-x86_64"
     dnf_common config
   end
   config.vm.define "opensuse-13" do |config|
@@ -78,8 +85,8 @@ Vagrant.configure(2) do |config|
   config.vm.synced_folder ".", "/vagrant", disabled: true
   config.vm.synced_folder ".", "/elasticsearch"
   config.vm.provider "virtualbox" do |v|
-    # Give the boxes 2GB so they can run our tests if they have to.
-    v.memory = 2048
+    # Give the boxes 3GB because Elasticsearch defaults to using 2GB
+    v.memory = 3072
   end
   if Vagrant.has_plugin?("vagrant-cachier")
     config.cache.scope = :box
@@ -149,6 +156,7 @@ def dnf_common(config)
     update_command: "dnf check-update",
     update_tracking_file: "/var/cache/dnf/last_update",
     install_command: "dnf install -y",
+    install_command_retries: 5,
     java_package: "java-1.8.0-openjdk-devel")
   if Vagrant.has_plugin?("vagrant-cachier")
     # Autodetect doesn't work....
@@ -198,6 +206,7 @@ def provision(config,
     update_command: 'required',
     update_tracking_file: 'required',
     install_command: 'required',
+    install_command_retries: 0,
     java_package: 'required',
     extra: '')
   # Vagrant run ruby 2.0.0 which doesn't have required named parameters....
@@ -208,9 +217,27 @@ def provision(config,
   config.vm.provision "bats dependencies", type: "shell", inline: <<-SHELL
     set -e
     set -o pipefail
+
+    # Retry install command up to $2 times, if failed
+    retry_installcommand() {
+      n=0
+      while true; do
+        #{install_command} $1 && break
+        let n=n+1
+        if [ $n -ge $2 ]; then
+          echo "==> Exhausted retries to install $1"
+          return 1
+        fi
+        echo "==> Retrying installing $1, attempt $((n+1))"
+        # Add a small delay to increase chance of metalink providing updated list of mirrors
+        sleep 5
+      done
+    }
+
     installed() {
       command -v $1 2>&1 >/dev/null
     }
+
     install() {
       # Only apt-get update if we haven't in the last day
       if [ ! -f #{update_tracking_file} ] || [ "x$(find #{update_tracking_file} -mtime +0)" == "x#{update_tracking_file}" ]; then
@@ -219,8 +246,14 @@ def provision(config,
         touch #{update_tracking_file}
       fi
       echo "==> Installing $1"
-      #{install_command} $1
+      if [ #{install_command_retries} -eq 0 ]
+      then
+            #{install_command} $1
+      else
+            retry_installcommand $1 #{install_command_retries}
+      fi
     }
+
     ensure() {
       installed $1 || install $1
     }

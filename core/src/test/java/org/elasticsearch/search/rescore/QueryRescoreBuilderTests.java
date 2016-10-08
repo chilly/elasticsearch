@@ -40,7 +40,7 @@ import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.mapper.ContentPath;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.Mapper;
-import org.elasticsearch.index.mapper.core.TextFieldMapper;
+import org.elasticsearch.index.mapper.TextFieldMapper;
 import org.elasticsearch.index.query.MatchAllQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryParseContext;
@@ -54,8 +54,8 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 
 import java.io.IOException;
-import java.util.Collections;
 
+import static java.util.Collections.emptyList;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
@@ -70,8 +70,9 @@ public class QueryRescoreBuilderTests extends ESTestCase {
      */
     @BeforeClass
     public static void init() {
-        namedWriteableRegistry = new NamedWriteableRegistry();
-        indicesQueriesRegistry = new SearchModule(Settings.EMPTY, namedWriteableRegistry).buildQueryParserRegistry();
+        SearchModule searchModule = new SearchModule(Settings.EMPTY, false, emptyList());
+        namedWriteableRegistry = new NamedWriteableRegistry(searchModule.getNamedWriteables());
+        indicesQueriesRegistry = searchModule.getQueryParserRegistry();
     }
 
     @AfterClass
@@ -130,8 +131,6 @@ public class QueryRescoreBuilderTests extends ESTestCase {
      *  creates random rescorer, renders it to xContent and back to new instance that should be equal to original
      */
     public void testFromXContent() throws IOException {
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry);
-        context.parseFieldMatcher(new ParseFieldMatcher(Settings.EMPTY));
         for (int runs = 0; runs < NUMBER_OF_TESTBUILDERS; runs++) {
             RescoreBuilder<?> rescoreBuilder = randomRescoreBuilder();
             XContentBuilder builder = XContentFactory.contentBuilder(randomFrom(XContentType.values()));
@@ -139,11 +138,11 @@ public class QueryRescoreBuilderTests extends ESTestCase {
                 builder.prettyPrint();
             }
             rescoreBuilder.toXContent(builder, ToXContent.EMPTY_PARAMS);
-            XContentBuilder shuffled = shuffleXContent(builder, Collections.emptySet());
+            XContentBuilder shuffled = shuffleXContent(builder);
 
 
             XContentParser parser = XContentHelper.createParser(shuffled.bytes());
-            context.reset(parser);
+            QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, parser, ParseFieldMatcher.STRICT);
             parser.nextToken();
             RescoreBuilder<?> secondRescoreBuilder = RescoreBuilder.parseFromXContent(context);
             assertNotSame(rescoreBuilder, secondRescoreBuilder);
@@ -157,12 +156,13 @@ public class QueryRescoreBuilderTests extends ESTestCase {
      * than the test builder
      */
     public void testBuildRescoreSearchContext() throws ElasticsearchParseException, IOException {
+        final long nowInMillis = randomPositiveLong();
         Settings indexSettings = Settings.builder()
                 .put(IndexMetaData.SETTING_VERSION_CREATED, Version.CURRENT).build();
         IndexSettings idxSettings = IndexSettingsModule.newIndexSettings(randomAsciiOfLengthBetween(1, 10), indexSettings);
         // shard context will only need indicesQueriesRegistry for building Query objects nested in query rescorer
-        QueryShardContext mockShardContext = new QueryShardContext(idxSettings, null, null, null, null, null, indicesQueriesRegistry,
-                null, null) {
+        QueryShardContext mockShardContext = new QueryShardContext(0, idxSettings, null, null, null, null, null, indicesQueriesRegistry,
+                null, null, null, () -> nowInMillis) {
             @Override
             public MappedFieldType fieldMapper(String name) {
                 TextFieldMapper.Builder builder = new TextFieldMapper.Builder(name);
@@ -184,18 +184,21 @@ public class QueryRescoreBuilderTests extends ESTestCase {
         }
     }
 
+    public void testRescoreQueryNull() throws IOException {
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> new QueryRescorerBuilder((QueryBuilder) null));
+        assertEquals("rescore_query cannot be null", e.getMessage());
+    }
+
     /**
      * test parsing exceptions for incorrect rescorer syntax
      */
     public void testUnknownFieldsExpection() throws IOException {
-        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry);
-        context.parseFieldMatcher(new ParseFieldMatcher(Settings.EMPTY));
 
         String rescoreElement = "{\n" +
                 "    \"window_size\" : 20,\n" +
                 "    \"bad_rescorer_name\" : { }\n" +
                 "}\n";
-        prepareContext(context, rescoreElement);
+        QueryParseContext context = createContext(rescoreElement);
         try {
             RescoreBuilder.parseFromXContent(context);
             fail("expected a parsing exception");
@@ -206,7 +209,7 @@ public class QueryRescoreBuilderTests extends ESTestCase {
         rescoreElement = "{\n" +
                 "    \"bad_fieldName\" : 20\n" +
                 "}\n";
-        prepareContext(context, rescoreElement);
+        context = createContext(rescoreElement);
         try {
             RescoreBuilder.parseFromXContent(context);
             fail("expected a parsing exception");
@@ -218,7 +221,7 @@ public class QueryRescoreBuilderTests extends ESTestCase {
                 "    \"window_size\" : 20,\n" +
                 "    \"query\" : [ ]\n" +
                 "}\n";
-        prepareContext(context, rescoreElement);
+        context = createContext(rescoreElement);
         try {
             RescoreBuilder.parseFromXContent(context);
             fail("expected a parsing exception");
@@ -227,7 +230,7 @@ public class QueryRescoreBuilderTests extends ESTestCase {
         }
 
         rescoreElement = "{ }";
-        prepareContext(context, rescoreElement);
+        context = createContext(rescoreElement);
         try {
             RescoreBuilder.parseFromXContent(context);
             fail("expected a parsing exception");
@@ -239,7 +242,7 @@ public class QueryRescoreBuilderTests extends ESTestCase {
                 "    \"window_size\" : 20,\n" +
                 "    \"query\" : { \"bad_fieldname\" : 1.0  } \n" +
                 "}\n";
-        prepareContext(context, rescoreElement);
+        context = createContext(rescoreElement);
         try {
             RescoreBuilder.parseFromXContent(context);
             fail("expected a parsing exception");
@@ -251,7 +254,7 @@ public class QueryRescoreBuilderTests extends ESTestCase {
                 "    \"window_size\" : 20,\n" +
                 "    \"query\" : { \"rescore_query\" : { \"unknown_queryname\" : { } } } \n" +
                 "}\n";
-        prepareContext(context, rescoreElement);
+        context = createContext(rescoreElement);
         try {
             RescoreBuilder.parseFromXContent(context);
             fail("expected a parsing exception");
@@ -263,18 +266,19 @@ public class QueryRescoreBuilderTests extends ESTestCase {
                 "    \"window_size\" : 20,\n" +
                 "    \"query\" : { \"rescore_query\" : { \"match_all\" : { } } } \n"
                 + "}\n";
-        prepareContext(context, rescoreElement);
+        context = createContext(rescoreElement);
         RescoreBuilder.parseFromXContent(context);
     }
 
     /**
      * create a new parser from the rescorer string representation and reset context with it
      */
-    private static void prepareContext(QueryParseContext context, String rescoreElement) throws IOException {
+    private static QueryParseContext createContext(String rescoreElement) throws IOException {
         XContentParser parser = XContentFactory.xContent(rescoreElement).createParser(rescoreElement);
-        context.reset(parser);
+        QueryParseContext context = new QueryParseContext(indicesQueriesRegistry, parser, ParseFieldMatcher.STRICT);
         // move to first token, this is where the internal fromXContent
         assertTrue(parser.nextToken() == XContentParser.Token.START_OBJECT);
+        return context;
     }
 
     private static RescoreBuilder<?> mutate(RescoreBuilder<?> original) throws IOException {
@@ -317,7 +321,7 @@ public class QueryRescoreBuilderTests extends ESTestCase {
      * create random shape that is put under test
      */
     public static QueryRescorerBuilder randomRescoreBuilder() {
-        QueryBuilder<MatchAllQueryBuilder> queryBuilder = new MatchAllQueryBuilder().boost(randomFloat())
+        QueryBuilder queryBuilder = new MatchAllQueryBuilder().boost(randomFloat())
                 .queryName(randomAsciiOfLength(20));
         org.elasticsearch.search.rescore.QueryRescorerBuilder rescorer = new
                 org.elasticsearch.search.rescore.QueryRescorerBuilder(queryBuilder);
@@ -338,9 +342,9 @@ public class QueryRescoreBuilderTests extends ESTestCase {
 
     private static RescoreBuilder<?> serializedCopy(RescoreBuilder<?> original) throws IOException {
         try (BytesStreamOutput output = new BytesStreamOutput()) {
-            output.writeRescorer(original);
-            try (StreamInput in = new NamedWriteableAwareStreamInput(StreamInput.wrap(output.bytes()), namedWriteableRegistry)) {
-                return in.readRescorer();
+            output.writeNamedWriteable(original);
+            try (StreamInput in = new NamedWriteableAwareStreamInput(output.bytes().streamInput(), namedWriteableRegistry)) {
+                return in.readNamedWriteable(RescoreBuilder.class);
             }
         }
     }

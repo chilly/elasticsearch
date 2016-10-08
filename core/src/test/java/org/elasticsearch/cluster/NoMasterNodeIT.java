@@ -23,13 +23,13 @@ import org.elasticsearch.action.ActionRequestBuilder;
 import org.elasticsearch.action.admin.cluster.state.ClusterStateResponse;
 import org.elasticsearch.action.bulk.BulkRequestBuilder;
 import org.elasticsearch.action.get.GetResponse;
-import org.elasticsearch.action.percolate.PercolateSourceBuilder;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.cluster.block.ClusterBlockException;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.discovery.DiscoveryModule;
 import org.elasticsearch.discovery.DiscoverySettings;
 import org.elasticsearch.discovery.MasterNotDiscoveredException;
 import org.elasticsearch.discovery.zen.ZenDiscovery;
@@ -40,9 +40,6 @@ import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.ESIntegTestCase.ClusterScope;
 import org.elasticsearch.test.ESIntegTestCase.Scope;
 
-import java.util.HashMap;
-
-import static org.elasticsearch.action.percolate.PercolateSourceBuilder.docBuilder;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertExists;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertHitCount;
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertThrows;
@@ -53,8 +50,14 @@ import static org.hamcrest.Matchers.lessThan;
 /**
  */
 @ClusterScope(scope = Scope.TEST, numDataNodes = 0)
-@ESIntegTestCase.SuppressLocalMode
 public class NoMasterNodeIT extends ESIntegTestCase {
+
+    @Override
+    protected Settings nodeSettings(int nodeOrdinal) {
+        return Settings.builder().put(super.nodeSettings(nodeOrdinal))
+            .put(DiscoveryModule.DISCOVERY_TYPE_SETTING.getKey(), "zen").build();
+    }
+
     public void testNoMasterActions() throws Exception {
         // note, sometimes, we want to check with the fact that an index gets created, sometimes not...
         boolean autoCreateIndex = randomBoolean();
@@ -98,22 +101,6 @@ public class NoMasterNodeIT extends ESIntegTestCase {
         );
 
         assertThrows(client().prepareMultiGet().add("no_index", "type1", "1"),
-                ClusterBlockException.class, RestStatus.SERVICE_UNAVAILABLE
-        );
-
-        PercolateSourceBuilder percolateSource = new PercolateSourceBuilder();
-        percolateSource.setDoc(docBuilder().setDoc(new HashMap()));
-        assertThrows(client().preparePercolate()
-                        .setIndices("test").setDocumentType("type1")
-                        .setSource(percolateSource),
-                ClusterBlockException.class, RestStatus.SERVICE_UNAVAILABLE
-        );
-
-        percolateSource = new PercolateSourceBuilder();
-        percolateSource.setDoc(docBuilder().setDoc(new HashMap()));
-        assertThrows(client().preparePercolate()
-                        .setIndices("no_index").setDocumentType("type1")
-                        .setSource(percolateSource),
                 ClusterBlockException.class, RestStatus.SERVICE_UNAVAILABLE
         );
 

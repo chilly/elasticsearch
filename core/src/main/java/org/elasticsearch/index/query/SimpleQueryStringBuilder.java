@@ -39,6 +39,7 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.TreeMap;
 
 /**
@@ -92,9 +93,6 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
 
     /** Name for (de-)serialization. */
     public static final String NAME = "simple_query_string";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME);
-
-    public static final SimpleQueryStringBuilder PROTOTYPE = new SimpleQueryStringBuilder("");
 
     private static final ParseField MINIMUM_SHOULD_MATCH_FIELD = new ParseField("minimum_should_match");
     private static final ParseField ANALYZE_WILDCARD_FIELD = new ParseField("analyze_wildcard");
@@ -138,6 +136,48 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
         this.queryText = queryText;
     }
 
+    /**
+     * Read from a stream.
+     */
+    public SimpleQueryStringBuilder(StreamInput in) throws IOException {
+        super(in);
+        queryText = in.readString();
+        int size = in.readInt();
+        Map<String, Float> fields = new HashMap<>();
+        for (int i = 0; i < size; i++) {
+            String field = in.readString();
+            Float weight = in.readFloat();
+            fields.put(field, weight);
+        }
+        fieldsAndWeights.putAll(fields);
+        flags = in.readInt();
+        analyzer = in.readOptionalString();
+        defaultOperator = Operator.readFromStream(in);
+        settings.lowercaseExpandedTerms(in.readBoolean());
+        settings.lenient(in.readBoolean());
+        settings.analyzeWildcard(in.readBoolean());
+        settings.locale(Locale.forLanguageTag(in.readString()));
+        minimumShouldMatch = in.readOptionalString();
+    }
+
+    @Override
+    protected void doWriteTo(StreamOutput out) throws IOException {
+        out.writeString(queryText);
+        out.writeInt(fieldsAndWeights.size());
+        for (Map.Entry<String, Float> entry : fieldsAndWeights.entrySet()) {
+            out.writeString(entry.getKey());
+            out.writeFloat(entry.getValue());
+        }
+        out.writeInt(flags);
+        out.writeOptionalString(analyzer);
+        defaultOperator.writeTo(out);
+        out.writeBoolean(settings.lowercaseExpandedTerms());
+        out.writeBoolean(settings.lenient());
+        out.writeBoolean(settings.analyzeWildcard());
+        out.writeString(settings.locale().toLanguageTag());
+        out.writeOptionalString(minimumShouldMatch);
+    }
+
     /** Returns the text to parse the query from. */
     public String value() {
         return this.queryText;
@@ -146,7 +186,7 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
     /** Add a field to run the query against. */
     public SimpleQueryStringBuilder field(String field) {
         if (Strings.isEmpty(field)) {
-            throw new IllegalArgumentException("supplied field is null or empty.");
+            throw new IllegalArgumentException("supplied field is null or empty");
         }
         this.fieldsAndWeights.put(field, AbstractQueryBuilder.DEFAULT_BOOST);
         return this;
@@ -155,7 +195,7 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
     /** Add a field to run the query against with a specific boost. */
     public SimpleQueryStringBuilder field(String field, float boost) {
         if (Strings.isEmpty(field)) {
-            throw new IllegalArgumentException("supplied field is null or empty.");
+            throw new IllegalArgumentException("supplied field is null or empty");
         }
         this.fieldsAndWeights.put(field, boost);
         return this;
@@ -315,7 +355,7 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
         if (analyzer == null) {
             luceneAnalyzer = context.getMapperService().searchAnalyzer();
         } else {
-            luceneAnalyzer = context.getAnalysisService().analyzer(analyzer);
+            luceneAnalyzer = context.getIndexAnalyzers().get(analyzer);
             if (luceneAnalyzer == null) {
                 throw new QueryShardException(context, "[" + SimpleQueryStringBuilder.NAME + "] analyzer [" + analyzer
                         + "] not found");
@@ -323,7 +363,7 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
 
         }
 
-        SimpleQueryParser sqp = new SimpleQueryParser(luceneAnalyzer, resolvedFieldsAndWeights, flags, settings);
+        SimpleQueryParser sqp = new SimpleQueryParser(luceneAnalyzer, resolvedFieldsAndWeights, flags, settings, context);
         sqp.setDefaultOperator(defaultOperator.toBooleanClauseOccur());
 
         Query query = sqp.parse(queryText);
@@ -377,7 +417,7 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
         builder.endObject();
     }
 
-    public static SimpleQueryStringBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<SimpleQueryStringBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
 
         String currentFieldName = null;
@@ -399,7 +439,7 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
             } else if (token == XContentParser.Token.START_ARRAY) {
-                if (parseContext.parseFieldMatcher().match(currentFieldName, FIELDS_FIELD)) {
+                if (parseContext.getParseFieldMatcher().match(currentFieldName, FIELDS_FIELD)) {
                     while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
                         String fField = null;
                         float fBoost = 1;
@@ -423,15 +463,15 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
                             "] query does not support [" + currentFieldName + "]");
                 }
             } else if (token.isValue()) {
-                if (parseContext.parseFieldMatcher().match(currentFieldName, QUERY_FIELD)) {
+                if (parseContext.getParseFieldMatcher().match(currentFieldName, QUERY_FIELD)) {
                     queryBody = parser.text();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
                     boost = parser.floatValue();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, ANALYZER_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, ANALYZER_FIELD)) {
                     analyzerName = parser.text();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, DEFAULT_OPERATOR_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, DEFAULT_OPERATOR_FIELD)) {
                     defaultOperator = Operator.fromString(parser.text());
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, FLAGS_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, FLAGS_FIELD)) {
                     if (parser.currentToken() != XContentParser.Token.VALUE_NUMBER) {
                         // Possible options are:
                         // ALL, NONE, AND, OR, PREFIX, PHRASE, PRECEDENCE, ESCAPE, WHITESPACE, FUZZY, NEAR, SLOP
@@ -442,18 +482,18 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
                             flags = SimpleQueryStringFlag.ALL.value();
                         }
                     }
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, LOCALE_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, LOCALE_FIELD)) {
                     String localeStr = parser.text();
                     locale = Locale.forLanguageTag(localeStr);
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, LOWERCASE_EXPANDED_TERMS_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, LOWERCASE_EXPANDED_TERMS_FIELD)) {
                     lowercaseExpandedTerms = parser.booleanValue();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, LENIENT_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, LENIENT_FIELD)) {
                     lenient = parser.booleanValue();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, ANALYZE_WILDCARD_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, ANALYZE_WILDCARD_FIELD)) {
                     analyzeWildcard = parser.booleanValue();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
                     queryName = parser.text();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, MINIMUM_SHOULD_MATCH_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, MINIMUM_SHOULD_MATCH_FIELD)) {
                     minimumShouldMatch = parser.textOrNull();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[" + SimpleQueryStringBuilder.NAME +
@@ -474,53 +514,12 @@ public class SimpleQueryStringBuilder extends AbstractQueryBuilder<SimpleQuerySt
         qb.boost(boost).fields(fieldsAndWeights).analyzer(analyzerName).queryName(queryName).minimumShouldMatch(minimumShouldMatch);
         qb.flags(flags).defaultOperator(defaultOperator).locale(locale).lowercaseExpandedTerms(lowercaseExpandedTerms);
         qb.lenient(lenient).analyzeWildcard(analyzeWildcard).boost(boost);
-        return qb;
+        return Optional.of(qb);
     }
 
     @Override
     public String getWriteableName() {
         return NAME;
-    }
-
-    @Override
-    protected SimpleQueryStringBuilder doReadFrom(StreamInput in) throws IOException {
-        SimpleQueryStringBuilder result = new SimpleQueryStringBuilder(in.readString());
-        int size = in.readInt();
-        Map<String, Float> fields = new HashMap<>();
-        for (int i = 0; i < size; i++) {
-            String field = in.readString();
-            Float weight = in.readFloat();
-            fields.put(field, weight);
-        }
-        result.fieldsAndWeights.putAll(fields);
-        result.flags = in.readInt();
-        result.analyzer = in.readOptionalString();
-        result.defaultOperator = Operator.readOperatorFrom(in);
-        result.settings.lowercaseExpandedTerms(in.readBoolean());
-        result.settings.lenient(in.readBoolean());
-        result.settings.analyzeWildcard(in.readBoolean());
-        String localeStr = in.readString();
-        result.settings.locale(Locale.forLanguageTag(localeStr));
-        result.minimumShouldMatch = in.readOptionalString();
-        return result;
-    }
-
-    @Override
-    protected void doWriteTo(StreamOutput out) throws IOException {
-        out.writeString(queryText);
-        out.writeInt(fieldsAndWeights.size());
-        for (Map.Entry<String, Float> entry : fieldsAndWeights.entrySet()) {
-            out.writeString(entry.getKey());
-            out.writeFloat(entry.getValue());
-        }
-        out.writeInt(flags);
-        out.writeOptionalString(analyzer);
-        defaultOperator.writeTo(out);
-        out.writeBoolean(settings.lowercaseExpandedTerms());
-        out.writeBoolean(settings.lenient());
-        out.writeBoolean(settings.analyzeWildcard());
-        out.writeString(settings.locale().toLanguageTag());
-        out.writeOptionalString(minimumShouldMatch);
     }
 
     @Override

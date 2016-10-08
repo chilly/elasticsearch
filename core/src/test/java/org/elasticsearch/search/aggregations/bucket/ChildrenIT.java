@@ -18,6 +18,7 @@
  */
 package org.elasticsearch.search.aggregations.bucket;
 
+import org.apache.lucene.search.join.ScoreMode;
 import org.elasticsearch.action.index.IndexRequestBuilder;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.update.UpdateResponse;
@@ -60,7 +61,7 @@ import static org.hamcrest.Matchers.sameInstance;
 @ESIntegTestCase.SuiteScopeTestCase
 public class ChildrenIT extends ESIntegTestCase {
 
-    private final static Map<String, Control> categoryToControl = new HashMap<>();
+    private static final Map<String, Control> categoryToControl = new HashMap<>();
 
     @Override
     public void setupSuiteScopeCluster() throws Exception {
@@ -133,10 +134,9 @@ public class ChildrenIT extends ESIntegTestCase {
         SearchResponse searchResponse = client().prepareSearch("test")
                 .setQuery(matchQuery("randomized", true))
                 .addAggregation(
-                        terms("category").field("category").size(0).subAggregation(
-children("to_comment", "comment")
+                        terms("category").field("category").size(10000).subAggregation(children("to_comment", "comment")
                                 .subAggregation(
-                                        terms("commenters").field("commenter").size(0).subAggregation(
+                                        terms("commenters").field("commenter").size(10000).subAggregation(
                                                 topHits("top_comments")
                                         ))
                         )
@@ -175,7 +175,7 @@ children("to_comment", "comment")
         SearchResponse searchResponse = client().prepareSearch("test")
                 .setQuery(matchQuery("randomized", false))
                 .addAggregation(
-                        terms("category").field("category").size(0).subAggregation(
+                        terms("category").field("category").size(10000).subAggregation(
                         children("to_comment", "comment").subAggregation(topHits("top_comments").sort("_uid", SortOrder.ASC))
                         )
                 ).get();
@@ -319,7 +319,7 @@ children("non-existing", "xyz")
         indexRandom(true, requests);
 
         SearchResponse response = client().prepareSearch(indexName).setTypes(masterType)
-                .setQuery(hasChildQuery(childType, termQuery("color", "orange")))
+                .setQuery(hasChildQuery(childType, termQuery("color", "orange"), ScoreMode.None))
 .addAggregation(children("my-refinements", childType)
                                 .subAggregation(terms("my-colors").field("color"))
                                 .subAggregation(terms("my-sizes").field("size"))

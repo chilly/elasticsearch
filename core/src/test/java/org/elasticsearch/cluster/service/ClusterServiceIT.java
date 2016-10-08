@@ -18,6 +18,8 @@
  */
 package org.elasticsearch.cluster.service;
 
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.logging.log4j.util.Supplier;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.elasticsearch.action.admin.cluster.tasks.PendingClusterTasksResponse;
 import org.elasticsearch.cluster.AckedClusterStateUpdateTask;
@@ -33,6 +35,7 @@ import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.inject.Singleton;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.discovery.DiscoveryModule;
 import org.elasticsearch.discovery.zen.ZenDiscovery;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
@@ -57,16 +60,18 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
-/**
- *
- */
 @ClusterScope(scope = Scope.TEST, numDataNodes = 0)
-@ESIntegTestCase.SuppressLocalMode
 public class ClusterServiceIT extends ESIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return pluginList(TestPlugin.class);
+        return Arrays.asList(TestPlugin.class);
+    }
+
+    @Override
+    protected Settings nodeSettings(int nodeOrdinal) {
+        return Settings.builder().put(super.nodeSettings(nodeOrdinal))
+            .put(DiscoveryModule.DISCOVERY_TYPE_SETTING.getKey(), "zen").build();
     }
 
     public void testAckedUpdateTask() throws Exception {
@@ -94,7 +99,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onAllNodesAcked(@Nullable Throwable t) {
+            public void onAllNodesAcked(@Nullable Exception e) {
                 allNodesAcked.set(true);
                 latch.countDown();
             }
@@ -127,8 +132,8 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
-                logger.error("failed to execute callback in test {}", t, source);
+            public void onFailure(String source, Exception e) {
+                logger.error((Supplier<?>) () -> new ParameterizedMessage("failed to execute callback in test {}", source), e);
                 onFailure.set(true);
                 latch.countDown();
             }
@@ -165,7 +170,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onAllNodesAcked(@Nullable Throwable t) {
+            public void onAllNodesAcked(@Nullable Exception e) {
                 allNodesAcked.set(true);
                 latch.countDown();
             }
@@ -198,8 +203,8 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
-                logger.error("failed to execute callback in test {}", t, source);
+            public void onFailure(String source, Exception e) {
+                logger.error((Supplier<?>) () -> new ParameterizedMessage("failed to execute callback in test {}", source), e);
                 onFailure.set(true);
                 latch.countDown();
             }
@@ -240,7 +245,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onAllNodesAcked(@Nullable Throwable t) {
+            public void onAllNodesAcked(@Nullable Exception e) {
                 allNodesAcked.set(true);
                 latch.countDown();
             }
@@ -272,8 +277,8 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
-                logger.error("failed to execute callback in test {}", t, source);
+            public void onFailure(String source, Exception e) {
+                logger.error((Supplier<?>) () -> new ParameterizedMessage("failed to execute callback in test {}", source), e);
                 onFailure.set(true);
                 latch.countDown();
             }
@@ -313,7 +318,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onAllNodesAcked(@Nullable Throwable t) {
+            public void onAllNodesAcked(@Nullable Exception e) {
                 allNodesAcked.set(true);
                 latch.countDown();
             }
@@ -346,8 +351,8 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
-                logger.error("failed to execute callback in test {}", t, source);
+            public void onFailure(String source, Exception e) {
+                logger.error((Supplier<?>) () -> new ParameterizedMessage("failed to execute callback in test {}", source), e);
                 onFailure.set(true);
                 latch.countDown();
             }
@@ -364,7 +369,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
         assertThat(processedLatch.await(1, TimeUnit.SECONDS), equalTo(true));
     }
 
-    @TestLogging("_root:debug,action.admin.cluster.tasks:trace")
+    @TestLogging("_root:debug,org.elasticsearch.action.admin.cluster.tasks:trace")
     public void testPendingUpdateTask() throws Exception {
         Settings settings = Settings.builder()
                 .put("discovery.type", "local")
@@ -388,7 +393,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
+            public void onFailure(String source, Exception e) {
                 invoked1.countDown();
                 fail();
             }
@@ -403,7 +408,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
                 }
 
                 @Override
-                public void onFailure(String source, Throwable t) {
+                public void onFailure(String source, Exception e) {
                     fail();
                 }
 
@@ -458,7 +463,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
+            public void onFailure(String source, Exception e) {
                 invoked3.countDown();
                 fail();
             }
@@ -473,7 +478,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
                 }
 
                 @Override
-                public void onFailure(String source, Throwable t) {
+                public void onFailure(String source, Exception e) {
                     fail();
                 }
             });
@@ -520,7 +525,6 @@ public class ClusterServiceIT extends ESIntegTestCase {
         assertThat(clusterService.state().nodes().getMasterNode(), notNullValue());
         assertThat(clusterService.state().nodes().isLocalNodeElectedMaster(), is(true));
         assertThat(testService.master(), is(true));
-
         String node_1 = internalCluster().startNode(settings);
         final ClusterService clusterService1 = internalCluster().getInstance(ClusterService.class, node_1);
         MasterAwareService testService1 = internalCluster().getInstance(MasterAwareService.class, node_1);
@@ -583,17 +587,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
     public static class TestPlugin extends Plugin {
 
         @Override
-        public String name() {
-            return "test plugin";
-        }
-
-        @Override
-        public String description() {
-            return "test plugin";
-        }
-
-        @Override
-        public Collection<Class<? extends LifecycleComponent>> nodeServices() {
+        public Collection<Class<? extends LifecycleComponent>> getGuiceServiceClasses() {
             List<Class<? extends LifecycleComponent>> services = new ArrayList<>(1);
             services.add(MasterAwareService.class);
             return services;
@@ -601,7 +595,7 @@ public class ClusterServiceIT extends ESIntegTestCase {
     }
 
     @Singleton
-    public static class MasterAwareService extends AbstractLifecycleComponent<MasterAwareService> implements LocalNodeMasterListener {
+    public static class MasterAwareService extends AbstractLifecycleComponent implements LocalNodeMasterListener {
 
         private final ClusterService clusterService;
         private volatile boolean master;

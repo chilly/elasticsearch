@@ -23,7 +23,7 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.search.aggregations.AggregationStreams;
+import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.InternalAggregation;
 import org.elasticsearch.search.aggregations.metrics.InternalNumericMetricsAggregation;
 import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
@@ -33,23 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 public final class InternalCardinality extends InternalNumericMetricsAggregation.SingleValue implements Cardinality {
-
-    public final static Type TYPE = new Type("cardinality");
-
-    public final static AggregationStreams.Stream STREAM = new AggregationStreams.Stream() {
-        @Override
-        public InternalCardinality readResult(StreamInput in) throws IOException {
-            InternalCardinality result = new InternalCardinality();
-            result.readFrom(in);
-            return result;
-        }
-    };
-
-    public static void registerStreams() {
-        AggregationStreams.registerStream(STREAM, TYPE.stream());
-    }
-
-    private HyperLogLogPlusPlus counts;
+    private final HyperLogLogPlusPlus counts;
 
     InternalCardinality(String name, HyperLogLogPlusPlus counts, List<PipelineAggregator> pipelineAggregators,
             Map<String, Object> metaData) {
@@ -57,7 +41,33 @@ public final class InternalCardinality extends InternalNumericMetricsAggregation
         this.counts = counts;
     }
 
-    private InternalCardinality() {
+    /**
+     * Read from a stream.
+     */
+    public InternalCardinality(StreamInput in) throws IOException {
+        super(in);
+        format = in.readNamedWriteable(DocValueFormat.class);
+        if (in.readBoolean()) {
+            counts = HyperLogLogPlusPlus.readFrom(in, BigArrays.NON_RECYCLING_INSTANCE);
+        } else {
+            counts = null;
+        }
+    }
+
+    @Override
+    protected void doWriteTo(StreamOutput out) throws IOException {
+        out.writeNamedWriteable(format);
+        if (counts != null) {
+            out.writeBoolean(true);
+            counts.writeTo(0, out);
+        } else {
+            out.writeBoolean(false);
+        }
+    }
+
+    @Override
+    public String getWriteableName() {
+        return CardinalityAggregationBuilder.NAME;
     }
 
     @Override
@@ -68,32 +78,6 @@ public final class InternalCardinality extends InternalNumericMetricsAggregation
     @Override
     public long getValue() {
         return counts == null ? 0 : counts.cardinality(0);
-    }
-
-    @Override
-    public Type type() {
-        return TYPE;
-    }
-
-    @Override
-    protected void doReadFrom(StreamInput in) throws IOException {
-        format = in.readValueFormat();
-        if (in.readBoolean()) {
-            counts = HyperLogLogPlusPlus.readFrom(in, BigArrays.NON_RECYCLING_INSTANCE);
-        } else {
-            counts = null;
-        }
-    }
-
-    @Override
-    protected void doWriteTo(StreamOutput out) throws IOException {
-        out.writeValueFormat(format);
-        if (counts != null) {
-            out.writeBoolean(true);
-            counts.writeTo(0, out);
-        } else {
-            out.writeBoolean(false);
-        }
     }
 
     @Override

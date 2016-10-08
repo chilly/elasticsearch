@@ -19,30 +19,37 @@
 
 package org.elasticsearch.bootstrap;
 
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.logging.log4j.util.Supplier;
 import org.apache.lucene.util.Constants;
-import org.elasticsearch.common.logging.ESLogger;
+import org.elasticsearch.common.SuppressForbidden;
+import org.elasticsearch.common.io.PathUtils;
 import org.elasticsearch.common.logging.Loggers;
-import org.elasticsearch.common.network.NetworkService;
-import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.discovery.zen.elect.ElectMasterService;
+import org.elasticsearch.common.transport.BoundTransportAddress;
+import org.elasticsearch.common.transport.TransportAddress;
+import org.elasticsearch.monitor.jvm.JvmInfo;
 import org.elasticsearch.monitor.process.ProcessProbe;
-import org.elasticsearch.transport.TransportSettings;
+import org.elasticsearch.node.Node;
+import org.elasticsearch.node.NodeValidationException;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * We enforce limits once any network host is configured. In this case we assume the node is running in production
  * and all production limit checks must pass. This should be extended as we go to settings like:
  * - discovery.zen.ping.unicast.hosts is set if we use zen disco
  * - ensure we can write in all data directories
- * - fail if vm.max_map_count is under a certain limit (not sure if this works cross platform)
  * - fail if the default cluster.name is used, if this is setup on network a real clustername should be used?
  */
 final class BootstrapCheck {
@@ -54,79 +61,117 @@ final class BootstrapCheck {
      * checks the current limits against the snapshot or release build
      * checks
      *
-     * @param settings the current node settings
+     * @param settings              the current node settings
+     * @param boundTransportAddress the node network bindings
      */
-    public static void check(final Settings settings) {
-        check(enforceLimits(settings), checks(settings));
+    static void check(final Settings settings, final BoundTransportAddress boundTransportAddress) throws NodeValidationException {
+        check(
+                enforceLimits(boundTransportAddress),
+                checks(settings),
+                Node.NODE_NAME_SETTING.get(settings));
     }
 
     /**
      * executes the provided checks and fails the node if
      * enforceLimits is true, otherwise logs warnings
      *
-     * @param enforceLimits true if the checks should be enforced or
-     *                      warned
-     * @param checks        the checks to execute
+     * @param enforceLimits      true if the checks should be enforced or
+     *                           otherwise warned
+     * @param checks             the checks to execute
+     * @param nodeName           the node name to be used as a logging prefix
      */
     // visible for testing
-    static void check(final boolean enforceLimits, final List<Check> checks) {
-        final ESLogger logger = Loggers.getLogger(BootstrapCheck.class);
-
-        for (final Check check : checks) {
-            final boolean fail = check.check();
-            if (fail) {
-                if (enforceLimits) {
-                    throw new RuntimeException(check.errorMessage());
-                } else {
-                    logger.warn(check.errorMessage());
-                }
-            }
-        }
+    static void check(
+        final boolean enforceLimits,
+        final List<Check> checks,
+        final String nodeName) throws NodeValidationException {
+        check(enforceLimits, checks, Loggers.getLogger(BootstrapCheck.class, nodeName));
     }
 
     /**
-     * The set of settings such that if any are set for the node, then
-     * the checks are enforced
+     * executes the provided checks and fails the node if
+     * enforceLimits is true, otherwise logs warnings
      *
-     * @return the enforcement settings
+     * @param enforceLimits      true if the checks should be enforced or
+     *                           otherwise warned
+     * @param checks             the checks to execute
+     * @param logger             the logger to
      */
-    // visible for testing
-    static Set<Setting> enforceSettings() {
-        return Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
-            TransportSettings.BIND_HOST,
-            TransportSettings.HOST,
-            TransportSettings.PUBLISH_HOST,
-            NetworkService.GLOBAL_NETWORK_HOST_SETTING,
-            NetworkService.GLOBAL_NETWORK_BINDHOST_SETTING,
-            NetworkService.GLOBAL_NETWORK_PUBLISHHOST_SETTING
-        )));
+    static void check(
+            final boolean enforceLimits,
+            final List<Check> checks,
+            final Logger logger) throws NodeValidationException {
+        final List<String> errors = new ArrayList<>();
+        final List<String> ignoredErrors = new ArrayList<>();
+
+        if (enforceLimits) {
+            logger.info("bound or publishing to a non-loopback or non-link-local address, enforcing bootstrap checks");
+        }
+
+        for (final Check check : checks) {
+            if (check.check()) {
+                if (!enforceLimits && !check.alwaysEnforce()) {
+                    ignoredErrors.add(check.errorMessage());
+                } else {
+                    errors.add(check.errorMessage());
+                }
+            }
+        }
+
+        if (!ignoredErrors.isEmpty()) {
+            ignoredErrors.forEach(error -> log(logger, error));
+        }
+
+        if (!errors.isEmpty()) {
+            final List<String> messages = new ArrayList<>(1 + errors.size());
+            messages.add("bootstrap checks failed");
+            messages.addAll(errors);
+            final NodeValidationException ne = new NodeValidationException(String.join("\n", messages));
+            errors.stream().map(IllegalStateException::new).forEach(ne::addSuppressed);
+            throw ne;
+        }
+
+    }
+
+    static void log(final Logger logger, final String error) {
+        logger.warn(error);
     }
 
     /**
      * Tests if the checks should be enforced
      *
-     * @param settings the current node settings
+     * @param boundTransportAddress the node network bindings
      * @return true if the checks should be enforced
      */
     // visible for testing
-    static boolean enforceLimits(final Settings settings) {
-        return enforceSettings().stream().anyMatch(s -> s.exists(settings));
+    static boolean enforceLimits(BoundTransportAddress boundTransportAddress) {
+        Predicate<TransportAddress> isLoopbackOrLinkLocalAddress = t -> t.address().getAddress().isLinkLocalAddress()
+            || t.address().getAddress().isLoopbackAddress();
+        return !(Arrays.stream(boundTransportAddress.boundAddresses()).allMatch(isLoopbackOrLinkLocalAddress) &&
+                isLoopbackOrLinkLocalAddress.test(boundTransportAddress.publishAddress()));
     }
 
     // the list of checks to execute
     static List<Check> checks(final Settings settings) {
         final List<Check> checks = new ArrayList<>();
+        checks.add(new HeapSizeCheck());
         final FileDescriptorCheck fileDescriptorCheck
             = Constants.MAC_OS_X ? new OsXFileDescriptorCheck() : new FileDescriptorCheck();
         checks.add(fileDescriptorCheck);
-        checks.add(new MlockallCheck(BootstrapSettings.MLOCKALL_SETTING.get(settings)));
+        checks.add(new MlockallCheck(BootstrapSettings.MEMORY_LOCK_SETTING.get(settings)));
         if (Constants.LINUX) {
             checks.add(new MaxNumberOfThreadsCheck());
         }
         if (Constants.LINUX || Constants.MAC_OS_X) {
             checks.add(new MaxSizeVirtualMemoryCheck());
         }
-        checks.add(new MinMasterNodesCheck(ElectMasterService.DISCOVERY_ZEN_MINIMUM_MASTER_NODES_SETTING.exists(settings)));
+        if (Constants.LINUX) {
+            checks.add(new MaxMapCountCheck());
+        }
+        checks.add(new ClientJvmCheck());
+        checks.add(new UseSerialGCCheck());
+        checks.add(new OnErrorCheck());
+        checks.add(new OnOutOfMemoryErrorCheck());
         return Collections.unmodifiableList(checks);
     }
 
@@ -149,6 +194,42 @@ final class BootstrapCheck {
          */
         String errorMessage();
 
+        default boolean alwaysEnforce() {
+            return false;
+        }
+
+    }
+
+    static class HeapSizeCheck implements BootstrapCheck.Check {
+
+        @Override
+        public boolean check() {
+            final long initialHeapSize = getInitialHeapSize();
+            final long maxHeapSize = getMaxHeapSize();
+            return initialHeapSize != 0 && maxHeapSize != 0 && initialHeapSize != maxHeapSize;
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                    Locale.ROOT,
+                    "initial heap size [%d] not equal to maximum heap size [%d]; " +
+                            "this can cause resize pauses and prevents mlockall from locking the entire heap",
+                    getInitialHeapSize(),
+                    getMaxHeapSize()
+            );
+        }
+
+        // visible for testing
+        long getInitialHeapSize() {
+            return JvmInfo.jvmInfo().getConfiguredInitialHeapSize();
+        }
+
+        // visible for testing
+        long getMaxHeapSize() {
+            return JvmInfo.jvmInfo().getConfiguredMaxHeapSize();
+        }
+
     }
 
     static class OsXFileDescriptorCheck extends FileDescriptorCheck {
@@ -163,7 +244,6 @@ final class BootstrapCheck {
 
     }
 
-    // visible for testing
     static class FileDescriptorCheck implements Check {
 
         private final int limit;
@@ -201,7 +281,6 @@ final class BootstrapCheck {
 
     }
 
-    // visible for testing
     static class MlockallCheck implements Check {
 
         private final boolean mlockallSet;
@@ -225,26 +304,6 @@ final class BootstrapCheck {
             return Natives.isMemoryLocked();
         }
 
-    }
-
-    static class MinMasterNodesCheck implements Check {
-
-        final boolean minMasterNodesIsSet;
-
-        MinMasterNodesCheck(boolean minMasterNodesIsSet) {
-            this.minMasterNodesIsSet = minMasterNodesIsSet;
-        }
-
-        @Override
-        public boolean check() {
-            return minMasterNodesIsSet == false;
-        }
-
-        @Override
-        public String errorMessage() {
-            return "please set [" + ElectMasterService.DISCOVERY_ZEN_MINIMUM_MASTER_NODES_SETTING.getKey() +
-                "] to a majority of the number of master eligible nodes in your cluster.";
-        }
     }
 
     static class MaxNumberOfThreadsCheck implements Check {
@@ -297,6 +356,194 @@ final class BootstrapCheck {
         // visible for testing
         long getMaxSizeVirtualMemory() {
             return JNANatives.MAX_SIZE_VIRTUAL_MEMORY;
+        }
+
+    }
+
+    static class MaxMapCountCheck implements Check {
+
+        private final long limit = 1 << 18;
+
+        @Override
+        public boolean check() {
+            return getMaxMapCount() != -1 && getMaxMapCount() < limit;
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                    Locale.ROOT,
+                    "max virtual memory areas vm.max_map_count [%d] likely too low, increase to at least [%d]",
+                    getMaxMapCount(),
+                    limit);
+        }
+
+        // visible for testing
+        long getMaxMapCount() {
+            return getMaxMapCount(Loggers.getLogger(BootstrapCheck.class));
+        }
+
+        // visible for testing
+        long getMaxMapCount(Logger logger) {
+            final Path path = getProcSysVmMaxMapCountPath();
+            try (final BufferedReader bufferedReader = getBufferedReader(path)) {
+                final String rawProcSysVmMaxMapCount = readProcSysVmMaxMapCount(bufferedReader);
+                if (rawProcSysVmMaxMapCount != null) {
+                    try {
+                        return parseProcSysVmMaxMapCount(rawProcSysVmMaxMapCount);
+                    } catch (final NumberFormatException e) {
+                        logger.warn(
+                            (Supplier<?>) () -> new ParameterizedMessage(
+                                "unable to parse vm.max_map_count [{}]",
+                                rawProcSysVmMaxMapCount),
+                            e);
+                    }
+                }
+            } catch (final IOException e) {
+                logger.warn((Supplier<?>) () -> new ParameterizedMessage("I/O exception while trying to read [{}]", path), e);
+            }
+            return -1;
+        }
+
+        @SuppressForbidden(reason = "access /proc/sys/vm/max_map_count")
+        private Path getProcSysVmMaxMapCountPath() {
+            return PathUtils.get("/proc/sys/vm/max_map_count");
+        }
+
+        // visible for testing
+        BufferedReader getBufferedReader(final Path path) throws IOException {
+            return Files.newBufferedReader(path);
+        }
+
+        // visible for testing
+        String readProcSysVmMaxMapCount(final BufferedReader bufferedReader) throws IOException {
+            return bufferedReader.readLine();
+        }
+
+        // visible for testing
+        long parseProcSysVmMaxMapCount(final String procSysVmMaxMapCount) throws NumberFormatException {
+            return Long.parseLong(procSysVmMaxMapCount);
+        }
+
+    }
+
+    static class ClientJvmCheck implements BootstrapCheck.Check {
+
+        @Override
+        public boolean check() {
+            return getVmName().toLowerCase(Locale.ROOT).contains("client");
+        }
+
+        // visible for testing
+        String getVmName() {
+            return JvmInfo.jvmInfo().getVmName();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                    Locale.ROOT,
+                    "JVM is using the client VM [%s] but should be using a server VM for the best performance",
+                    getVmName());
+        }
+
+    }
+
+    /**
+     * Checks if the serial collector is in use. This collector is single-threaded and devastating
+     * for performance and should not be used for a server application like Elasticsearch.
+     */
+    static class UseSerialGCCheck implements BootstrapCheck.Check {
+
+        @Override
+        public boolean check() {
+            return getUseSerialGC().equals("true");
+        }
+
+        // visible for testing
+        String getUseSerialGC() {
+            return JvmInfo.jvmInfo().useSerialGC();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                Locale.ROOT,
+                "JVM is using the serial collector but should not be for the best performance; " +
+                    "either it's the default for the VM [%s] or -XX:+UseSerialGC was explicitly specified",
+                JvmInfo.jvmInfo().getVmName());
+        }
+
+    }
+
+    abstract static class MightForkCheck implements BootstrapCheck.Check {
+
+        @Override
+        public boolean check() {
+            return isSeccompInstalled() && mightFork();
+        }
+
+        // visible for testing
+        boolean isSeccompInstalled() {
+            return Natives.isSeccompInstalled();
+        }
+
+        // visible for testing
+        abstract boolean mightFork();
+
+        @Override
+        public final boolean alwaysEnforce() {
+            return true;
+        }
+
+    }
+
+    static class OnErrorCheck extends MightForkCheck {
+
+        @Override
+        boolean mightFork() {
+            final String onError = onError();
+            return onError != null && !onError.equals("");
+        }
+
+        // visible for testing
+        String onError() {
+            return JvmInfo.jvmInfo().onError();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                Locale.ROOT,
+                "OnError [%s] requires forking but is prevented by system call filters ([%s=true]);" +
+                    " upgrade to at least Java 8u92 and use ExitOnOutOfMemoryError",
+                onError(),
+                BootstrapSettings.SECCOMP_SETTING.getKey());
+        }
+
+    }
+
+    static class OnOutOfMemoryErrorCheck extends MightForkCheck {
+
+        @Override
+        boolean mightFork() {
+            final String onOutOfMemoryError = onOutOfMemoryError();
+            return onOutOfMemoryError != null && !onOutOfMemoryError.equals("");
+        }
+
+        // visible for testing
+        String onOutOfMemoryError() {
+            return JvmInfo.jvmInfo().onOutOfMemoryError();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                Locale.ROOT,
+                "OnOutOfMemoryError [%s] requires forking but is prevented by system call filters ([%s=true]);" +
+                    " upgrade to at least Java 8u92 and use ExitOnOutOfMemoryError",
+                onOutOfMemoryError(),
+                BootstrapSettings.SECCOMP_SETTING.getKey());
         }
 
     }

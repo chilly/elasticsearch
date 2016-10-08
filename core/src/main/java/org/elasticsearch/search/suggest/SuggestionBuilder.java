@@ -43,7 +43,7 @@ import java.util.Objects;
 /**
  * Base class for the different suggestion implementations.
  */
-public abstract class SuggestionBuilder<T extends SuggestionBuilder<T>> extends ToXContentToBytes implements NamedWriteable<T> {
+public abstract class SuggestionBuilder<T extends SuggestionBuilder<T>> extends ToXContentToBytes implements NamedWriteable {
 
     protected final String field;
     protected String text;
@@ -257,7 +257,7 @@ public abstract class SuggestionBuilder<T extends SuggestionBuilder<T>> extends 
     static SuggestionBuilder<?> fromXContent(QueryParseContext parseContext, Suggesters suggesters)
             throws IOException {
         XContentParser parser = parseContext.parser();
-        ParseFieldMatcher parsefieldMatcher = parseContext.parseFieldMatcher();
+        ParseFieldMatcher parsefieldMatcher = parseContext.getParseFieldMatcher();
         XContentParser.Token token;
         String currentFieldName = null;
         String suggestText = null;
@@ -319,7 +319,7 @@ public abstract class SuggestionBuilder<T extends SuggestionBuilder<T>> extends 
                 suggestionContext.setAnalyzer(fieldType.searchAnalyzer());
             }
         } else {
-            Analyzer luceneAnalyzer = mapperService.analysisService().analyzer(analyzer);
+            Analyzer luceneAnalyzer = mapperService.getIndexAnalyzers().get(analyzer);
             if (luceneAnalyzer == null) {
                 throw new IllegalArgumentException("analyzer [" + analyzer + "] doesn't exists");
             }

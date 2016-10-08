@@ -127,7 +127,7 @@ public final class LinearInterpolation extends SmoothingModel {
     }
 
     @Override
-    protected final int doHashCode() {
+    protected int doHashCode() {
         return Objects.hash(trigramLambda, bigramLambda, unigramLambda);
     }
 
@@ -138,7 +138,7 @@ public final class LinearInterpolation extends SmoothingModel {
         double trigramLambda = 0.0;
         double bigramLambda = 0.0;
         double unigramLambda = 0.0;
-        ParseFieldMatcher matcher = parseContext.parseFieldMatcher();
+        ParseFieldMatcher matcher = parseContext.getParseFieldMatcher();
         while ((token = parser.nextToken()) != Token.END_OBJECT) {
             if (token == XContentParser.Token.FIELD_NAME) {
                 fieldName = parser.currentName();

@@ -19,6 +19,8 @@
 
 package org.elasticsearch.action.admin.cluster.settings;
 
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.logging.log4j.util.Supplier;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ActionFilters;
@@ -31,7 +33,6 @@ import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.routing.allocation.AllocationService;
-import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.Priority;
@@ -93,11 +94,11 @@ public class TransportClusterUpdateSettingsAction extends TransportMasterNodeAct
             }
 
             @Override
-            public void onAllNodesAcked(@Nullable Throwable t) {
+            public void onAllNodesAcked(@Nullable Exception e) {
                 if (changed) {
                     reroute(true);
                 } else {
-                    super.onAllNodesAcked(t);
+                    super.onAllNodesAcked(e);
                 }
             }
 
@@ -146,28 +147,24 @@ public class TransportClusterUpdateSettingsAction extends TransportMasterNodeAct
                     }
 
                     @Override
-                    public void onFailure(String source, Throwable t) {
+                    public void onFailure(String source, Exception e) {
                         //if the reroute fails we only log
-                        logger.debug("failed to perform [{}]", t, source);
-                        listener.onFailure(new ElasticsearchException("reroute after update settings failed", t));
+                        logger.debug((Supplier<?>) () -> new ParameterizedMessage("failed to perform [{}]", source), e);
+                        listener.onFailure(new ElasticsearchException("reroute after update settings failed", e));
                     }
 
                     @Override
                     public ClusterState execute(final ClusterState currentState) {
                         // now, reroute in case things that require it changed (e.g. number of replicas)
-                        RoutingAllocation.Result routingResult = allocationService.reroute(currentState, "reroute after cluster update settings");
-                        if (!routingResult.changed()) {
-                            return currentState;
-                        }
-                        return ClusterState.builder(currentState).routingResult(routingResult).build();
+                        return allocationService.reroute(currentState, "reroute after cluster update settings");
                     }
                 });
             }
 
             @Override
-            public void onFailure(String source, Throwable t) {
-                logger.debug("failed to perform [{}]", t, source);
-                super.onFailure(source, t);
+            public void onFailure(String source, Exception e) {
+                logger.debug((Supplier<?>) () -> new ParameterizedMessage("failed to perform [{}]", source), e);
+                super.onFailure(source, e);
             }
 
             @Override

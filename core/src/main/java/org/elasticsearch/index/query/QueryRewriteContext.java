@@ -19,38 +19,56 @@
 package org.elasticsearch.index.query;
 
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.common.ParseFieldMatcher;
+import org.elasticsearch.common.ParseFieldMatcherSupplier;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.indices.query.IndicesQueriesRegistry;
+import org.elasticsearch.script.ExecutableScript;
+import org.elasticsearch.script.Script;
+import org.elasticsearch.script.ScriptContext;
 import org.elasticsearch.script.ScriptService;
+import org.elasticsearch.script.ScriptSettings;
+
+import java.util.Collections;
+import java.util.function.LongSupplier;
 
 /**
  * Context object used to rewrite {@link QueryBuilder} instances into simplified version.
  */
-public class QueryRewriteContext {
+public class QueryRewriteContext implements ParseFieldMatcherSupplier {
     protected final MapperService mapperService;
     protected final ScriptService scriptService;
     protected final IndexSettings indexSettings;
     protected final IndicesQueriesRegistry indicesQueriesRegistry;
-    protected final QueryParseContext parseContext;
+    protected final Client client;
     protected final IndexReader reader;
+    protected final ClusterState clusterState;
+    protected final LongSupplier nowInMillis;
 
     public QueryRewriteContext(IndexSettings indexSettings, MapperService mapperService, ScriptService scriptService,
-            IndicesQueriesRegistry indicesQueriesRegistry, IndexReader reader) {
+                               IndicesQueriesRegistry indicesQueriesRegistry, Client client, IndexReader reader,
+                               ClusterState clusterState, LongSupplier nowInMillis) {
         this.mapperService = mapperService;
         this.scriptService = scriptService;
         this.indexSettings = indexSettings;
         this.indicesQueriesRegistry = indicesQueriesRegistry;
-        this.parseContext = new QueryParseContext(indicesQueriesRegistry);
+        this.client = client;
         this.reader = reader;
+        this.clusterState = clusterState;
+        this.nowInMillis = nowInMillis;
     }
 
     /**
      * Returns a clients to fetch resources from local or remove nodes.
      */
     public final Client getClient() {
-        return scriptService.getClient();
+        return client;
     }
 
     /**
@@ -59,13 +77,6 @@ public class QueryRewriteContext {
      */
     public final IndexSettings getIndexSettings() {
         return indexSettings;
-    }
-
-    /**
-     * Returns a script service to fetch scripts.
-     */
-    public final ScriptService getScriptService() {
-        return scriptService;
     }
 
     /**
@@ -80,12 +91,44 @@ public class QueryRewriteContext {
         return reader;
     }
 
-    /**
-     * Returns a new {@link QueryParseContext} to parse template or wrapped queries.
-     */
-    public QueryParseContext newParseContext() {
-        QueryParseContext queryParseContext = new QueryParseContext(indicesQueriesRegistry);
-        queryParseContext.parseFieldMatcher(parseContext.parseFieldMatcher());
-        return queryParseContext;
+    @Override
+    public ParseFieldMatcher getParseFieldMatcher() {
+        return this.indexSettings.getParseFieldMatcher();
     }
+
+    /**
+     * Returns the cluster state as is when the operation started.
+     */
+    public ClusterState getClusterState() {
+        return clusterState;
+    }
+
+    /**
+     * Returns a new {@link QueryParseContext} that wraps the provided parser, using the ParseFieldMatcher settings that
+     * are configured in the index settings. The default script language will always default to Painless.
+     */
+    public QueryParseContext newParseContext(XContentParser parser) {
+        return new QueryParseContext(indicesQueriesRegistry, parser, indexSettings.getParseFieldMatcher());
+    }
+
+    /**
+     * Returns a new {@link QueryParseContext} like {@link #newParseContext(XContentParser)} with the only diffence, that
+     * the default script language will default to what has been set in the 'script.legacy.default_lang' setting.
+     */
+    public QueryParseContext newParseContextWithLegacyScriptLanguage(XContentParser parser) {
+        String defaultScriptLanguage = ScriptSettings.getLegacyDefaultLang(indexSettings.getNodeSettings());
+        return new QueryParseContext(defaultScriptLanguage, indicesQueriesRegistry, parser, indexSettings.getParseFieldMatcher());
+    }
+
+    public long nowInMillis() {
+        return nowInMillis.getAsLong();
+    }
+
+    public BytesReference getTemplateBytes(Script template) {
+        ExecutableScript executable = scriptService.executable(template,
+            ScriptContext.Standard.SEARCH, Collections.emptyMap());
+        return (BytesReference) executable.run();
+    }
+
+
 }

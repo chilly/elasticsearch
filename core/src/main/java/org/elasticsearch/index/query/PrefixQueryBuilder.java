@@ -36,15 +36,13 @@ import org.elasticsearch.index.query.support.QueryParsers;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * A Query that matches documents containing terms with a specified prefix.
  */
-public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder> implements MultiTermQueryBuilder<PrefixQueryBuilder> {
-
+public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder> implements MultiTermQueryBuilder {
     public static final String NAME = "prefix";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME);
-    public static final PrefixQueryBuilder PROTOTYPE = new PrefixQueryBuilder("field", "value");
 
     private static final ParseField PREFIX_FIELD = new ParseField("value", "prefix");
     private static final ParseField REWRITE_FIELD = new ParseField("rewrite");
@@ -66,10 +64,27 @@ public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder>
             throw new IllegalArgumentException("field name is null or empty");
         }
         if (value == null) {
-            throw new IllegalArgumentException("value cannot be null.");
+            throw new IllegalArgumentException("value cannot be null");
         }
         this.fieldName = fieldName;
         this.value = value;
+    }
+
+    /**
+     * Read from a stream.
+     */
+    public PrefixQueryBuilder(StreamInput in) throws IOException {
+        super(in);
+        fieldName = in.readString();
+        value = in.readString();
+        rewrite = in.readOptionalString();
+    }
+
+    @Override
+    protected void doWriteTo(StreamOutput out) throws IOException {
+        out.writeString(fieldName);
+        out.writeString(value);
+        out.writeOptionalString(rewrite);
     }
 
     public String fieldName() {
@@ -102,10 +117,10 @@ public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder>
         builder.endObject();
     }
 
-    public static PrefixQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<PrefixQueryBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
 
-        String fieldName = parser.currentName();
+        String fieldName = null;
         String value = null;
         String rewrite = null;
 
@@ -119,38 +134,37 @@ public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder>
             } else if (parseContext.isDeprecatedSetting(currentFieldName)) {
                 // skip
             } else if (token == XContentParser.Token.START_OBJECT) {
+                throwParsingExceptionOnMultipleFields(NAME, parser.getTokenLocation(), fieldName, currentFieldName);
                 fieldName = currentFieldName;
                 while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
                     if (token == XContentParser.Token.FIELD_NAME) {
                         currentFieldName = parser.currentName();
                     } else {
-                        if (parseContext.parseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
+                        if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
                             queryName = parser.text();
-                        } else if (parseContext.parseFieldMatcher().match(currentFieldName, PREFIX_FIELD)) {
+                        } else if (parseContext.getParseFieldMatcher().match(currentFieldName, PREFIX_FIELD)) {
                             value = parser.textOrNull();
-                        } else if (parseContext.parseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
+                        } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
                             boost = parser.floatValue();
-                        } else if (parseContext.parseFieldMatcher().match(currentFieldName, REWRITE_FIELD)) {
+                        } else if (parseContext.getParseFieldMatcher().match(currentFieldName, REWRITE_FIELD)) {
                             rewrite = parser.textOrNull();
                         } else {
                             throw new ParsingException(parser.getTokenLocation(),
-                                    "[regexp] query does not support [" + currentFieldName + "]");
+                                    "[prefix] query does not support [" + currentFieldName + "]");
                         }
                     }
                 }
             } else {
-                    fieldName = currentFieldName;
-                    value = parser.textOrNull();
+                throwParsingExceptionOnMultipleFields(NAME, parser.getTokenLocation(), fieldName, parser.currentName());
+                fieldName = currentFieldName;
+                value = parser.textOrNull();
             }
         }
 
-        if (value == null) {
-            throw new ParsingException(parser.getTokenLocation(), "No value specified for prefix query");
-        }
-        return new PrefixQueryBuilder(fieldName, value)
+        return Optional.of(new PrefixQueryBuilder(fieldName, value)
                 .rewrite(rewrite)
                 .boost(boost)
-                .queryName(queryName);
+                .queryName(queryName));
     }
 
     @Override
@@ -160,7 +174,7 @@ public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder>
 
     @Override
     protected Query doToQuery(QueryShardContext context) throws IOException {
-        MultiTermQuery.RewriteMethod method = QueryParsers.parseRewriteMethod(context.parseFieldMatcher(), rewrite, null);
+        MultiTermQuery.RewriteMethod method = QueryParsers.parseRewriteMethod(context.getParseFieldMatcher(), rewrite, null);
 
         Query query = null;
         MappedFieldType fieldType = context.fieldMapper(fieldName);
@@ -176,20 +190,6 @@ public class PrefixQueryBuilder extends AbstractQueryBuilder<PrefixQueryBuilder>
         }
 
         return query;
-    }
-
-    @Override
-    protected PrefixQueryBuilder doReadFrom(StreamInput in) throws IOException {
-        PrefixQueryBuilder prefixQueryBuilder = new PrefixQueryBuilder(in.readString(), in.readString());
-        prefixQueryBuilder.rewrite = in.readOptionalString();
-        return prefixQueryBuilder;
-    }
-
-    @Override
-    protected void doWriteTo(StreamOutput out) throws IOException {
-        out.writeString(fieldName);
-        out.writeString(value);
-        out.writeOptionalString(rewrite);
     }
 
     @Override

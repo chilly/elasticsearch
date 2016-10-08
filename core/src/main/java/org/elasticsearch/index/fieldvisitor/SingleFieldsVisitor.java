@@ -19,10 +19,10 @@
 package org.elasticsearch.index.fieldvisitor;
 
 import org.apache.lucene.index.FieldInfo;
+import org.elasticsearch.index.mapper.IdFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.internal.IdFieldMapper;
-import org.elasticsearch.index.mapper.internal.TypeFieldMapper;
-import org.elasticsearch.index.mapper.internal.UidFieldMapper;
+import org.elasticsearch.index.mapper.TypeFieldMapper;
+import org.elasticsearch.index.mapper.UidFieldMapper;
 
 import java.io.IOException;
 import java.util.List;
@@ -79,7 +79,7 @@ public class SingleFieldsVisitor extends FieldsVisitor {
             return;
         }
         for (int i = 0; i < fieldValues.size(); i++) {
-            fieldValues.set(i, fieldType.valueForSearch(fieldValues.get(i)));
+            fieldValues.set(i, fieldType.valueForDisplay(fieldValues.get(i)));
         }
     }
 }

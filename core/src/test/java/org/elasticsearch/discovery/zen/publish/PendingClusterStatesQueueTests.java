@@ -24,7 +24,7 @@ import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
-import org.elasticsearch.common.transport.DummyTransportAddress;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.discovery.zen.publish.PendingClusterStatesQueue.ClusterStateContext;
 import org.elasticsearch.test.ESTestCase;
 
@@ -235,8 +235,8 @@ public class PendingClusterStatesQueueTests extends ESTestCase {
             int masterIndex = randomInt(masters.length - 1);
             ClusterState state = lastClusterStatePerMaster[masterIndex];
             if (state == null) {
-                state = ClusterState.builder(ClusterName.DEFAULT).nodes(DiscoveryNodes.builder()
-                                .put(new DiscoveryNode(masters[masterIndex], DummyTransportAddress.INSTANCE,
+                state = ClusterState.builder(ClusterName.CLUSTER_NAME_SETTING.getDefault(Settings.EMPTY)).nodes(DiscoveryNodes.builder()
+                                .add(new DiscoveryNode(masters[masterIndex], buildNewFakeTransportAddress(),
                                         emptyMap(), emptySet(),Version.CURRENT)).masterNodeId(masters[masterIndex]).build()
                 ).build();
             } else {
@@ -258,8 +258,8 @@ public class PendingClusterStatesQueueTests extends ESTestCase {
         }
 
         @Override
-        public void onNewClusterStateFailed(Throwable t) {
-            failure = t;
+        public void onNewClusterStateFailed(Exception e) {
+            failure = e;
         }
     }
 

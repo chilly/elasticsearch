@@ -30,7 +30,7 @@ import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.mapper.Uid;
-import org.elasticsearch.index.mapper.internal.UidFieldMapper;
+import org.elasticsearch.index.mapper.UidFieldMapper;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -40,16 +40,14 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
  * A query that will return only documents matching specific ids (and a type).
  */
 public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
-
     public static final String NAME = "ids";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME);
-    public static final IdsQueryBuilder PROTOTYPE = new IdsQueryBuilder();
 
     private static final ParseField TYPE_FIELD = new ParseField("type", "types", "_type");
     private static final ParseField VALUES_FIELD = new ParseField("values");
@@ -57,7 +55,6 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
     private final Set<String> ids = new HashSet<>();
 
     private final String[] types;
-
 
     /**
      * Creates a new IdsQueryBuilder without providing the types of the documents to look for
@@ -74,6 +71,21 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
             throw new IllegalArgumentException("[ids] types cannot be null");
         }
         this.types = types;
+    }
+
+    /**
+     * Read from a stream.
+     */
+    public IdsQueryBuilder(StreamInput in) throws IOException {
+        super(in);
+        types = in.readStringArray();
+        Collections.addAll(ids, in.readStringArray());
+    }
+
+    @Override
+    protected void doWriteTo(StreamOutput out) throws IOException {
+        out.writeStringArray(types);
+        out.writeStringArray(ids.toArray(new String[ids.size()]));
     }
 
     /**
@@ -114,7 +126,7 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
         builder.endObject();
     }
 
-    public static IdsQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<IdsQueryBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
         List<String> ids = new ArrayList<>();
         List<String> types = new ArrayList<>();
@@ -128,7 +140,7 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
             } else if (token == XContentParser.Token.START_ARRAY) {
-                if (parseContext.parseFieldMatcher().match(currentFieldName, VALUES_FIELD)) {
+                if (parseContext.getParseFieldMatcher().match(currentFieldName, VALUES_FIELD)) {
                     idsProvided = true;
                     while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
                         if ((token == XContentParser.Token.VALUE_STRING) ||
@@ -143,7 +155,7 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
                                     "Illegal value for id, expecting a string or number, got: " + token);
                         }
                     }
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, TYPE_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, TYPE_FIELD)) {
                     while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
                         String value = parser.textOrNull();
                         if (value == null) {
@@ -156,11 +168,11 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
                             "] query does not support [" + currentFieldName + "]");
                 }
             } else if (token.isValue()) {
-                if (parseContext.parseFieldMatcher().match(currentFieldName, TYPE_FIELD)) {
+                if (parseContext.getParseFieldMatcher().match(currentFieldName, TYPE_FIELD)) {
                     types = Collections.singletonList(parser.text());
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
                     boost = parser.floatValue();
-                } else if (parseContext.parseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
+                } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
                     queryName = parser.text();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[" + IdsQueryBuilder.NAME +
@@ -178,7 +190,7 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
         IdsQueryBuilder query = new IdsQueryBuilder(types.toArray(new String[types.size()]));
         query.addIds(ids.toArray(new String[ids.size()]));
         query.boost(boost).queryName(queryName);
-        return query;
+        return Optional.of(query);
     }
 
 
@@ -191,7 +203,7 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
     protected Query doToQuery(QueryShardContext context) throws IOException {
         Query query;
         if (this.ids.isEmpty()) {
-             query = Queries.newMatchNoDocsQuery();
+             query = Queries.newMatchNoDocsQuery("Missing ids in \"" + this.getName() + "\" query.");
         } else {
             Collection<String> typesForQuery;
             if (types.length == 0) {
@@ -206,19 +218,6 @@ public class IdsQueryBuilder extends AbstractQueryBuilder<IdsQueryBuilder> {
             query = new TermsQuery(UidFieldMapper.NAME, Uid.createUidsForTypesAndIds(typesForQuery, ids));
         }
         return query;
-    }
-
-    @Override
-    protected IdsQueryBuilder doReadFrom(StreamInput in) throws IOException {
-        IdsQueryBuilder idsQueryBuilder = new IdsQueryBuilder(in.readStringArray());
-        idsQueryBuilder.addIds(in.readStringArray());
-        return idsQueryBuilder;
-    }
-
-    @Override
-    protected void doWriteTo(StreamOutput out) throws IOException {
-        out.writeStringArray(types);
-        out.writeStringArray(ids.toArray(new String[ids.size()]));
     }
 
     @Override

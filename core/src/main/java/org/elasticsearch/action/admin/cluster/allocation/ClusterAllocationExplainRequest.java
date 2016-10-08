@@ -24,14 +24,14 @@ import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.support.master.MasterNodeRequest;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.ParseField;
-import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.ParseFieldMatcher;
+import org.elasticsearch.common.ParseFieldMatcherSupplier;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.ObjectParser;
 import org.elasticsearch.common.xcontent.XContentParser;
 
 import java.io.IOException;
-import java.util.Objects;
 
 import static org.elasticsearch.action.ValidateActions.addValidationError;
 
@@ -40,7 +40,8 @@ import static org.elasticsearch.action.ValidateActions.addValidationError;
  */
 public class ClusterAllocationExplainRequest extends MasterNodeRequest<ClusterAllocationExplainRequest> {
 
-    private static ObjectParser<ClusterAllocationExplainRequest, Void> PARSER = new ObjectParser("cluster/allocation/explain");
+    private static ObjectParser<ClusterAllocationExplainRequest, ParseFieldMatcherSupplier> PARSER = new ObjectParser(
+            "cluster/allocation/explain");
     static {
         PARSER.declareString(ClusterAllocationExplainRequest::setIndex, new ParseField("index"));
         PARSER.declareInt(ClusterAllocationExplainRequest::setShard, new ParseField("shard"));
@@ -51,6 +52,7 @@ public class ClusterAllocationExplainRequest extends MasterNodeRequest<ClusterAl
     private Integer shard;
     private Boolean primary;
     private boolean includeYesDecisions = false;
+    private boolean includeDiskInfo = false;
 
     /** Explain the first unassigned shard */
     public ClusterAllocationExplainRequest() {
@@ -133,6 +135,16 @@ public class ClusterAllocationExplainRequest extends MasterNodeRequest<ClusterAl
         return this.includeYesDecisions;
     }
 
+    /** {@code true} to include information about the gathered disk information of nodes in the cluster */
+    public void includeDiskInfo(boolean includeDiskInfo) {
+        this.includeDiskInfo = includeDiskInfo;
+    }
+
+    /** Returns true if information about disk usage and shard sizes should also be returned */
+    public boolean includeDiskInfo() {
+        return this.includeDiskInfo;
+    }
+
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder("ClusterAllocationExplainRequest[");
@@ -148,7 +160,7 @@ public class ClusterAllocationExplainRequest extends MasterNodeRequest<ClusterAl
     }
 
     public static ClusterAllocationExplainRequest parse(XContentParser parser) throws IOException {
-        ClusterAllocationExplainRequest req = PARSER.parse(parser, new ClusterAllocationExplainRequest());
+        ClusterAllocationExplainRequest req = PARSER.parse(parser, new ClusterAllocationExplainRequest(), () -> ParseFieldMatcher.STRICT);
         Exception e = req.validate();
         if (e != null) {
             throw new ElasticsearchParseException("'index', 'shard', and 'primary' must be specified in allocation explain request", e);
@@ -163,6 +175,7 @@ public class ClusterAllocationExplainRequest extends MasterNodeRequest<ClusterAl
         this.shard = in.readOptionalVInt();
         this.primary = in.readOptionalBoolean();
         this.includeYesDecisions = in.readBoolean();
+        this.includeDiskInfo = in.readBoolean();
     }
 
     @Override
@@ -172,5 +185,6 @@ public class ClusterAllocationExplainRequest extends MasterNodeRequest<ClusterAl
         out.writeOptionalVInt(shard);
         out.writeOptionalBoolean(primary);
         out.writeBoolean(includeYesDecisions);
+        out.writeBoolean(includeDiskInfo);
     }
 }

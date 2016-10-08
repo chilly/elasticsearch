@@ -23,9 +23,11 @@ import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.CompositeIndicesRequest;
 import org.elasticsearch.action.IndicesRequest;
-import org.elasticsearch.action.WriteConsistencyLevel;
 import org.elasticsearch.action.delete.DeleteRequest;
 import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.support.ActiveShardCount;
+import org.elasticsearch.action.support.WriteRequest;
+import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.action.update.UpdateRequest;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.Strings;
@@ -33,16 +35,20 @@ import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.logging.DeprecationLogger;
+import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.lucene.uid.Versions;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContent;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.VersionType;
+import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 import static org.elasticsearch.action.ValidateActions.addValidationError;
 
@@ -53,16 +59,23 @@ import static org.elasticsearch.action.ValidateActions.addValidationError;
  * Note that we only support refresh on the bulk request not per item.
  * @see org.elasticsearch.client.Client#bulk(BulkRequest)
  */
-public class BulkRequest extends ActionRequest<BulkRequest> implements CompositeIndicesRequest {
+public class BulkRequest extends ActionRequest<BulkRequest> implements CompositeIndicesRequest, WriteRequest<BulkRequest> {
+    private static final DeprecationLogger DEPRECATION_LOGGER =
+        new DeprecationLogger(Loggers.getLogger(BulkRequest.class));
 
     private static final int REQUEST_OVERHEAD = 50;
 
+    /**
+     * Requests that are part of this request. It is only possible to add things that are both {@link ActionRequest}s and
+     * {@link WriteRequest}s to this but java doesn't support syntax to declare that everything in the array has both types so we declare
+     * the one with the least casts.
+     */
     final List<ActionRequest<?>> requests = new ArrayList<>();
     List<Object> payloads = null;
 
     protected TimeValue timeout = BulkShardRequest.DEFAULT_TIMEOUT;
-    private WriteConsistencyLevel consistencyLevel = WriteConsistencyLevel.DEFAULT;
-    private boolean refresh = false;
+    private ActiveShardCount waitForActiveShards = ActiveShardCount.DEFAULT;
+    private RefreshPolicy refreshPolicy = RefreshPolicy.NONE;
 
     private long sizeInBytes = 0;
 
@@ -125,6 +138,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
     }
 
     BulkRequest internalAdd(IndexRequest request, @Nullable Object payload) {
+        Objects.requireNonNull(request, "'request' must not be null");
         requests.add(request);
         addPayload(payload);
         // lack of source is validated in validate() method
@@ -144,6 +158,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
     }
 
     BulkRequest internalAdd(UpdateRequest request, @Nullable Object payload) {
+        Objects.requireNonNull(request, "'request' must not be null");
         requests.add(request);
         addPayload(payload);
         if (request.doc() != null) {
@@ -166,6 +181,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
     }
 
     public BulkRequest add(DeleteRequest request, @Nullable Object payload) {
+        Objects.requireNonNull(request, "'request' must not be null");
         requests.add(request);
         addPayload(payload);
         sizeInBytes += REQUEST_OVERHEAD;
@@ -231,32 +247,32 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
     /**
      * Adds a framed data in binary format
      */
-    public BulkRequest add(byte[] data, int from, int length) throws Exception {
+    public BulkRequest add(byte[] data, int from, int length) throws IOException {
         return add(data, from, length, null, null);
     }
 
     /**
      * Adds a framed data in binary format
      */
-    public BulkRequest add(byte[] data, int from, int length, @Nullable String defaultIndex, @Nullable String defaultType) throws Exception {
+    public BulkRequest add(byte[] data, int from, int length, @Nullable String defaultIndex, @Nullable String defaultType) throws IOException {
         return add(new BytesArray(data, from, length), defaultIndex, defaultType);
     }
 
     /**
      * Adds a framed data in binary format
      */
-    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType) throws Exception {
-        return add(data, defaultIndex, defaultType, null, null, null, null, true);
+    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType) throws IOException {
+        return add(data, defaultIndex, defaultType, null, null, null, null, null, true);
     }
 
     /**
      * Adds a framed data in binary format
      */
-    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType, boolean allowExplicitIndex) throws Exception {
-        return add(data, defaultIndex, defaultType, null, null, null, null, allowExplicitIndex);
+    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType, boolean allowExplicitIndex) throws IOException {
+        return add(data, defaultIndex, defaultType, null, null, null, null, null, allowExplicitIndex);
     }
 
-    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType, @Nullable String defaultRouting, @Nullable String[] defaultFields, @Nullable String defaultPipeline, @Nullable Object payload, boolean allowExplicitIndex) throws Exception {
+    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType, @Nullable String defaultRouting, @Nullable String[] defaultFields, @Nullable FetchSourceContext defaultFetchSourceContext, @Nullable String defaultPipeline, @Nullable Object payload, boolean allowExplicitIndex) throws IOException {
         XContent xContent = XContentFactory.xContent(data);
         int line = 0;
         int from = 0;
@@ -290,6 +306,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
                 String id = null;
                 String routing = defaultRouting;
                 String parent = null;
+                FetchSourceContext fetchSourceContext = defaultFetchSourceContext;
                 String[] fields = defaultFields;
                 String timestamp = null;
                 TimeValue ttl = null;
@@ -342,16 +359,21 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
                                 pipeline = parser.text();
                             } else if ("fields".equals(currentFieldName)) {
                                 throw new IllegalArgumentException("Action/metadata line [" + line + "] contains a simple value for parameter [fields] while a list is expected");
+                            } else if ("_source".equals(currentFieldName)) {
+                                fetchSourceContext = FetchSourceContext.parse(parser);
                             } else {
                                 throw new IllegalArgumentException("Action/metadata line [" + line + "] contains an unknown parameter [" + currentFieldName + "]");
                             }
                         } else if (token == XContentParser.Token.START_ARRAY) {
                             if ("fields".equals(currentFieldName)) {
+                                DEPRECATION_LOGGER.deprecated("Deprecated field [fields] used, expected [_source] instead");
                                 List<Object> values = parser.list();
                                 fields = values.toArray(new String[values.size()]);
                             } else {
                                 throw new IllegalArgumentException("Malformed action/metadata line [" + line + "], expected a simple value for field [" + currentFieldName + "] but found [" + token + "]");
                             }
+                        } else if (token == XContentParser.Token.START_OBJECT && "_source".equals(currentFieldName)) {
+                            fetchSourceContext = FetchSourceContext.parse(parser);
                         } else if (token != XContentParser.Token.VALUE_NULL) {
                             throw new IllegalArgumentException("Malformed action/metadata line [" + line + "], expected a simple value for field [" + currentFieldName + "] but found [" + token + "]");
                         }
@@ -391,7 +413,10 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
                                 .version(version).versionType(versionType)
                                 .routing(routing)
                                 .parent(parent)
-                                .source(data.slice(from, nextMarker - from));
+                                .fromXContent(data.slice(from, nextMarker - from));
+                        if (fetchSourceContext != null) {
+                            updateRequest.fetchSource(fetchSourceContext);
+                        }
                         if (fields != null) {
                             updateRequest.fields(fields);
                         }
@@ -422,29 +447,36 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
     }
 
     /**
-     * Sets the consistency level of write. Defaults to {@link org.elasticsearch.action.WriteConsistencyLevel#DEFAULT}
+     * Sets the number of shard copies that must be active before proceeding with the write.
+     * See {@link ReplicationRequest#waitForActiveShards(ActiveShardCount)} for details.
      */
-    public BulkRequest consistencyLevel(WriteConsistencyLevel consistencyLevel) {
-        this.consistencyLevel = consistencyLevel;
+    public BulkRequest waitForActiveShards(ActiveShardCount waitForActiveShards) {
+        this.waitForActiveShards = waitForActiveShards;
         return this;
-    }
-
-    public WriteConsistencyLevel consistencyLevel() {
-        return this.consistencyLevel;
     }
 
     /**
-     * Should a refresh be executed post this bulk operation causing the operations to
-     * be searchable. Note, heavy indexing should not set this to <tt>true</tt>. Defaults
-     * to <tt>false</tt>.
+     * A shortcut for {@link #waitForActiveShards(ActiveShardCount)} where the numerical
+     * shard count is passed in, instead of having to first call {@link ActiveShardCount#from(int)}
+     * to get the ActiveShardCount.
      */
-    public BulkRequest refresh(boolean refresh) {
-        this.refresh = refresh;
+    public BulkRequest waitForActiveShards(final int waitForActiveShards) {
+        return waitForActiveShards(ActiveShardCount.from(waitForActiveShards));
+    }
+
+    public ActiveShardCount waitForActiveShards() {
+        return this.waitForActiveShards;
+    }
+
+    @Override
+    public BulkRequest setRefreshPolicy(RefreshPolicy refreshPolicy) {
+        this.refreshPolicy = refreshPolicy;
         return this;
     }
 
-    public boolean refresh() {
-        return this.refresh;
+    @Override
+    public RefreshPolicy getRefreshPolicy() {
+        return refreshPolicy;
     }
 
     /**
@@ -479,7 +511,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
      * @return Whether this bulk request contains index request with an ingest pipeline enabled.
      */
     public boolean hasIndexRequestsWithPipelines() {
-        for (ActionRequest actionRequest : requests) {
+        for (ActionRequest<?> actionRequest : requests) {
             if (actionRequest instanceof IndexRequest) {
                 IndexRequest indexRequest = (IndexRequest) actionRequest;
                 if (Strings.hasText(indexRequest.getPipeline())) {
@@ -499,10 +531,9 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
         }
         for (ActionRequest<?> request : requests) {
             // We first check if refresh has been set
-            if ((request instanceof DeleteRequest && ((DeleteRequest)request).refresh()) ||
-                    (request instanceof UpdateRequest && ((UpdateRequest)request).refresh()) ||
-                    (request instanceof IndexRequest && ((IndexRequest)request).refresh())) {
-                    validationException = addValidationError("Refresh is not supported on an item request, set the refresh flag on the BulkRequest instead.", validationException);
+            if (((WriteRequest<?>) request).getRefreshPolicy() != RefreshPolicy.NONE) {
+                validationException = addValidationError(
+                        "RefreshPolicy is not supported on an item request. Set it on the BulkRequest instead.", validationException);
             }
             ActionRequestValidationException ex = request.validate();
             if (ex != null) {
@@ -519,7 +550,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
     @Override
     public void readFrom(StreamInput in) throws IOException {
         super.readFrom(in);
-        consistencyLevel = WriteConsistencyLevel.fromId(in.readByte());
+        waitForActiveShards = ActiveShardCount.readFrom(in);
         int size = in.readVInt();
         for (int i = 0; i < size; i++) {
             byte type = in.readByte();
@@ -537,14 +568,14 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
                 requests.add(request);
             }
         }
-        refresh = in.readBoolean();
-        timeout = TimeValue.readTimeValue(in);
+        refreshPolicy = RefreshPolicy.readFrom(in);
+        timeout = new TimeValue(in);
     }
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         super.writeTo(out);
-        out.writeByte(consistencyLevel.id());
+        waitForActiveShards.writeTo(out);
         out.writeVInt(requests.size());
         for (ActionRequest<?> request : requests) {
             if (request instanceof IndexRequest) {
@@ -556,7 +587,7 @@ public class BulkRequest extends ActionRequest<BulkRequest> implements Composite
             }
             request.writeTo(out);
         }
-        out.writeBoolean(refresh);
+        refreshPolicy.writeTo(out);
         timeout.writeTo(out);
     }
 }

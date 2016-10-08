@@ -18,10 +18,10 @@
  */
 package org.elasticsearch.discovery.zen.publish;
 
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.common.logging.ESLogger;
 
 import java.util.ArrayList;
 import java.util.Locale;
@@ -51,14 +51,14 @@ public class PendingClusterStatesQueue {
 
         void onNewClusterStateProcessed();
 
-        void onNewClusterStateFailed(Throwable t);
+        void onNewClusterStateFailed(Exception e);
     }
 
     final ArrayList<ClusterStateContext> pendingStates = new ArrayList<>();
-    final ESLogger logger;
+    final Logger logger;
     final int maxQueueSize;
 
-    public PendingClusterStatesQueue(ESLogger logger, int maxQueueSize) {
+    public PendingClusterStatesQueue(Logger logger, int maxQueueSize) {
         this.logger = logger;
         this.maxQueueSize = maxQueueSize;
     }
@@ -97,7 +97,7 @@ public class PendingClusterStatesQueue {
      * mark that the processing of the given state has failed. All committed states that are {@link ClusterState#supersedes(ClusterState)}-ed
      * by this failed state, will be failed as well
      */
-    public synchronized void markAsFailed(ClusterState state, Throwable reason) {
+    public synchronized void markAsFailed(ClusterState state, Exception reason) {
         final ClusterStateContext failedContext = findState(state.stateUUID());
         if (failedContext == null) {
             throw new IllegalArgumentException("can't resolve failed cluster state with uuid [" + state.stateUUID() + "], version [" + state.version() + "]");
@@ -194,8 +194,9 @@ public class PendingClusterStatesQueue {
         return null;
     }
 
-    /** clear the incoming queue. any committed state will be failed */
-    public synchronized void failAllStatesAndClear(Throwable reason) {
+    /** clear the incoming queue. any committed state will be failed
+     */
+    public synchronized void failAllStatesAndClear(Exception reason) {
         for (ClusterStateContext pendingState : pendingStates) {
             if (pendingState.committed()) {
                 pendingState.listener.onNewClusterStateFailed(reason);

@@ -34,6 +34,7 @@ import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.transport.MockTransportService;
 import org.elasticsearch.transport.TransportService;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
@@ -48,7 +49,6 @@ import static org.hamcrest.Matchers.equalTo;
  * Test failure when index replication actions fail mid-flight
  */
 @ESIntegTestCase.ClusterScope(scope = ESIntegTestCase.Scope.TEST, numDataNodes = 0, transportClientRatio = 0)
-@ESIntegTestCase.SuppressLocalMode
 public class TransportIndexFailuresIT extends ESIntegTestCase {
 
     private static final Settings nodeSettings = Settings.builder()
@@ -61,7 +61,7 @@ public class TransportIndexFailuresIT extends ESIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return pluginList(MockTransportService.TestPlugin.class);
+        return Arrays.asList(MockTransportService.TestPlugin.class);
     }
 
     @Override

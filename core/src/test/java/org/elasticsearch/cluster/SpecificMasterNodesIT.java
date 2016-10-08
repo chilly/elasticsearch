@@ -19,8 +19,10 @@
 
 package org.elasticsearch.cluster;
 
+import org.apache.lucene.search.join.ScoreMode;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.discovery.DiscoveryModule;
 import org.elasticsearch.discovery.MasterNotDiscoveredException;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.node.Node;
@@ -29,6 +31,7 @@ import org.elasticsearch.test.ESIntegTestCase.ClusterScope;
 import org.elasticsearch.test.ESIntegTestCase.Scope;
 
 import java.io.IOException;
+import java.util.Map;
 
 import static org.elasticsearch.test.hamcrest.ElasticsearchAssertions.assertAcked;
 import static org.hamcrest.Matchers.equalTo;
@@ -36,8 +39,13 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 @ClusterScope(scope = Scope.TEST, numDataNodes = 0)
-@ESIntegTestCase.SuppressLocalMode
 public class SpecificMasterNodesIT extends ESIntegTestCase {
+
+    @Override
+    protected Settings nodeSettings(int nodeOrdinal) {
+        return Settings.builder().put(super.nodeSettings(nodeOrdinal))
+            .put(DiscoveryModule.DISCOVERY_TYPE_SETTING.getKey(), "zen").build();
+    }
     protected final Settings.Builder settingsBuilder() {
         return Settings.builder().put("discovery.type", "zen");
     }
@@ -110,16 +118,18 @@ public class SpecificMasterNodesIT extends ESIntegTestCase {
         internalCluster().startNode(settingsBuilder().put(Node.NODE_DATA_SETTING.getKey(), true).put(Node.NODE_MASTER_SETTING.getKey(), false));
 
         createIndex("test");
-        assertAcked(client().admin().indices().preparePutMapping("test").setType("_default_").setSource("_timestamp", "enabled=true"));
+        assertAcked(client().admin().indices().preparePutMapping("test").setType("_default_").setSource("timestamp", "type=date"));
 
         MappingMetaData defaultMapping = client().admin().cluster().prepareState().get().getState().getMetaData().getIndices().get("test").getMappings().get("_default_");
-        assertThat(defaultMapping.getSourceAsMap().get("_timestamp"), notNullValue());
+        Map<?,?> properties = (Map<?, ?>) defaultMapping.getSourceAsMap().get("properties");
+        assertThat(properties.get("timestamp"), notNullValue());
 
-        assertAcked(client().admin().indices().preparePutMapping("test").setType("_default_").setSource("_timestamp", "enabled=true"));
+        assertAcked(client().admin().indices().preparePutMapping("test").setType("_default_").setSource("timestamp", "type=date"));
 
         assertAcked(client().admin().indices().preparePutMapping("test").setType("type1").setSource("foo", "enabled=true"));
         MappingMetaData type1Mapping = client().admin().cluster().prepareState().get().getState().getMetaData().getIndices().get("test").getMappings().get("type1");
-        assertThat(type1Mapping.getSourceAsMap().get("_timestamp"), notNullValue());
+        properties = (Map<?, ?>) type1Mapping.getSourceAsMap().get("properties");
+        assertThat(properties.get("timestamp"), notNullValue());
     }
 
     public void testAliasFilterValidation() throws Exception {
@@ -130,6 +140,6 @@ public class SpecificMasterNodesIT extends ESIntegTestCase {
         internalCluster().startNode(settingsBuilder().put(Node.NODE_DATA_SETTING.getKey(), true).put(Node.NODE_MASTER_SETTING.getKey(), false));
 
         assertAcked(prepareCreate("test").addMapping("type1", "{\"type1\" : {\"properties\" : {\"table_a\" : { \"type\" : \"nested\", \"properties\" : {\"field_a\" : { \"type\" : \"keyword\" },\"field_b\" :{ \"type\" : \"keyword\" }}}}}}"));
-        client().admin().indices().prepareAliases().addAlias("test", "a_test", QueryBuilders.nestedQuery("table_a", QueryBuilders.termQuery("table_a.field_b", "y"))).get();
+        client().admin().indices().prepareAliases().addAlias("test", "a_test", QueryBuilders.nestedQuery("table_a", QueryBuilders.termQuery("table_a.field_b", "y"), ScoreMode.Avg)).get();
     }
 }

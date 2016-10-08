@@ -20,7 +20,7 @@ package org.elasticsearch.cluster.shards;
 
 import org.elasticsearch.action.admin.cluster.shards.ClusterSearchShardsGroup;
 import org.elasticsearch.action.admin.cluster.shards.ClusterSearchShardsResponse;
-import org.elasticsearch.cluster.metadata.AliasAction;
+import org.elasticsearch.action.admin.indices.alias.IndicesAliasesRequest.AliasActions;
 import org.elasticsearch.common.Priority;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.test.ESIntegTestCase;
@@ -43,7 +43,7 @@ public class ClusterSearchShardsIT extends ESIntegTestCase {
 
     @Override
     protected Settings nodeSettings(int nodeOrdinal) {
-        switch(nodeOrdinal) {
+        switch(nodeOrdinal % 2) {
         case 1:
             return Settings.builder().put(super.nodeSettings(nodeOrdinal)).put("node.attr.tag", "B").build();
         case 0:
@@ -99,9 +99,9 @@ public class ClusterSearchShardsIT extends ESIntegTestCase {
         client().admin().indices().prepareCreate("test2").setSettings(Settings.builder()
                 .put("index.number_of_shards", "4").put("index.number_of_replicas", 1)).execute().actionGet();
         client().admin().indices().prepareAliases()
-                .addAliasAction(AliasAction.newAddAliasAction("test1", "routing_alias").routing("ABC"))
-                .addAliasAction(AliasAction.newAddAliasAction("test2", "routing_alias").routing("EFG"))
-                .execute().actionGet();
+                .addAliasAction(AliasActions.add().index("test1").alias("routing_alias").routing("ABC"))
+                .addAliasAction(AliasActions.add().index("test2").alias("routing_alias").routing("EFG"))
+                .get();
         client().admin().cluster().prepareHealth().setWaitForEvents(Priority.LANGUID).setWaitForGreenStatus().execute().actionGet();
 
         ClusterSearchShardsResponse response = client().admin().cluster().prepareSearchShards("routing_alias").execute().actionGet();

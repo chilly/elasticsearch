@@ -42,10 +42,13 @@ import org.elasticsearch.index.fielddata.IndexNumericFieldData;
 import org.elasticsearch.index.fielddata.MultiGeoPointValues;
 import org.elasticsearch.index.fielddata.NumericDoubleValues;
 import org.elasticsearch.index.fielddata.SortedNumericDoubleValues;
+import org.elasticsearch.index.mapper.BaseGeoPointFieldMapper;
+import org.elasticsearch.index.mapper.DateFieldMapper;
+import org.elasticsearch.index.mapper.LegacyDateFieldMapper;
+import org.elasticsearch.index.mapper.LegacyNumberFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.core.DateFieldMapper;
-import org.elasticsearch.index.mapper.core.NumberFieldMapper;
-import org.elasticsearch.index.mapper.geo.BaseGeoPointFieldMapper;
+import org.elasticsearch.index.mapper.NumberFieldMapper;
+import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.search.MultiValueMode;
 
@@ -146,8 +149,9 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
     public void doXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject(getName());
         builder.field(fieldName);
-        XContentParser parser = XContentFactory.xContent(functionBytes).createParser(functionBytes);
-        builder.copyCurrentStructure(parser);
+        try (XContentParser parser = XContentFactory.xContent(functionBytes).createParser(functionBytes)) {
+            builder.copyCurrentStructure(parser);
+        }
         builder.field(DecayFunctionParser.MULTI_VALUE_MODE.getPreferredName(), multiValueMode.name());
         builder.endObject();
     }
@@ -179,8 +183,11 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
 
     @Override
     protected ScoreFunction doToFunction(QueryShardContext context) throws IOException {
-        XContentParser parser = XContentFactory.xContent(functionBytes).createParser(functionBytes);
-        return parseVariable(fieldName, parser, context, multiValueMode);
+        AbstractDistanceScoreFunction scoreFunction;
+        try (XContentParser parser = XContentFactory.xContent(functionBytes).createParser(functionBytes)) {
+            scoreFunction = parseVariable(fieldName, parser, context, multiValueMode);
+        }
+        return scoreFunction;
     }
 
     /**
@@ -198,12 +205,14 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
 
         // dates and time and geo need special handling
         parser.nextToken();
-        if (fieldType instanceof DateFieldMapper.DateFieldType) {
-            return parseDateVariable(parser, context, (DateFieldMapper.DateFieldType) fieldType, mode);
+        if (fieldType instanceof LegacyDateFieldMapper.DateFieldType
+                || fieldType instanceof DateFieldMapper.DateFieldType) {
+            return parseDateVariable(parser, context, fieldType, mode);
         } else if (fieldType instanceof BaseGeoPointFieldMapper.GeoPointFieldType) {
-            return parseGeoVariable(parser, context, (BaseGeoPointFieldMapper.GeoPointFieldType) fieldType, mode);
-        } else if (fieldType instanceof NumberFieldMapper.NumberFieldType) {
-            return parseNumberVariable(parser, context, (NumberFieldMapper.NumberFieldType) fieldType, mode);
+            return parseGeoVariable(parser, context, fieldType, mode);
+        } else if (fieldType instanceof LegacyNumberFieldMapper.NumberFieldType
+                || fieldType instanceof NumberFieldMapper.NumberFieldType) {
+            return parseNumberVariable(parser, context, fieldType, mode);
         } else {
             throw new ParsingException(parser.getTokenLocation(), "field [{}] is of type [{}], but only numeric types are supported.",
                     fieldName, fieldType);
@@ -211,7 +220,7 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
     }
 
     private AbstractDistanceScoreFunction parseNumberVariable(XContentParser parser, QueryShardContext context,
-            NumberFieldMapper.NumberFieldType fieldType, MultiValueMode mode) throws IOException {
+            MappedFieldType fieldType, MultiValueMode mode) throws IOException {
         XContentParser.Token token;
         String parameterName = null;
         double scale = 0;
@@ -246,7 +255,7 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
     }
 
     private AbstractDistanceScoreFunction parseGeoVariable(XContentParser parser, QueryShardContext context,
-            BaseGeoPointFieldMapper.GeoPointFieldType fieldType, MultiValueMode mode) throws IOException {
+            MappedFieldType fieldType, MultiValueMode mode) throws IOException {
         XContentParser.Token token;
         String parameterName = null;
         GeoPoint origin = new GeoPoint();
@@ -280,7 +289,7 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
     }
 
     private AbstractDistanceScoreFunction parseDateVariable(XContentParser parser, QueryShardContext context,
-            DateFieldMapper.DateFieldType dateFieldType, MultiValueMode mode) throws IOException {
+            MappedFieldType dateFieldType, MultiValueMode mode) throws IOException {
         XContentParser.Token token;
         String parameterName = null;
         String scaleString = null;
@@ -306,7 +315,12 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
         if (originString == null) {
             origin = context.nowInMillis();
         } else {
-            origin = dateFieldType.parseToMilliseconds(originString, false, null, null);
+            if (dateFieldType instanceof LegacyDateFieldMapper.DateFieldType) {
+                origin = ((LegacyDateFieldMapper.DateFieldType) dateFieldType).parseToMilliseconds(originString, false, null, null,
+                        context);
+            } else {
+                origin = ((DateFieldMapper.DateFieldType) dateFieldType).parseToMilliseconds(originString, false, null, null, context);
+            }
         }
 
         if (scaleString == null) {
@@ -489,7 +503,7 @@ public abstract class DecayFunctionBuilder<DFB extends DecayFunctionBuilder<DFB>
      * This is the base class for scoring a single field.
      *
      * */
-    public static abstract class AbstractDistanceScoreFunction extends ScoreFunction {
+    public abstract static class AbstractDistanceScoreFunction extends ScoreFunction {
 
         private final double scale;
         protected final double offset;

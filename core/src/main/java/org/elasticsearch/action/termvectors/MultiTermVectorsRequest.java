@@ -94,7 +94,7 @@ public class MultiTermVectorsRequest extends ActionRequest<MultiTermVectorsReque
         return requests;
     }
 
-    public void add(TermVectorsRequest template, BytesReference data) throws Exception {
+    public void add(TermVectorsRequest template, BytesReference data) throws IOException {
         XContentParser.Token token;
         String currentFieldName = null;
         if (data.length() > 0) {
@@ -173,7 +173,7 @@ public class MultiTermVectorsRequest extends ActionRequest<MultiTermVectorsReque
     }
 
     @Override
-    public MultiTermVectorsRequest realtime(Boolean realtime) {
+    public MultiTermVectorsRequest realtime(boolean realtime) {
         for (TermVectorsRequest request : requests) {
             request.realtime(realtime);
         }

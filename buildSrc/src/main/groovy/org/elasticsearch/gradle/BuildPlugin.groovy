@@ -28,11 +28,13 @@ import org.gradle.api.Task
 import org.gradle.api.XmlProvider
 import org.gradle.api.artifacts.Configuration
 import org.gradle.api.artifacts.ModuleDependency
-import org.gradle.api.artifacts.ModuleVersionIdentifier
 import org.gradle.api.artifacts.ProjectDependency
 import org.gradle.api.artifacts.ResolvedArtifact
 import org.gradle.api.artifacts.dsl.RepositoryHandler
-import org.gradle.api.artifacts.maven.MavenPom
+import org.gradle.api.plugins.JavaPlugin
+import org.gradle.api.publish.maven.MavenPublication
+import org.gradle.api.publish.maven.plugins.MavenPublishPlugin
+import org.gradle.api.publish.maven.tasks.GenerateMavenPom
 import org.gradle.api.tasks.bundling.Jar
 import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.internal.jvm.Jvm
@@ -54,13 +56,12 @@ class BuildPlugin implements Plugin<Project> {
         project.pluginManager.apply('java')
         project.pluginManager.apply('carrotsearch.randomized-testing')
         // these plugins add lots of info to our jars
-        configureJarManifest(project) // jar config must be added before info broker
+        configureJars(project) // jar config must be added before info broker
         project.pluginManager.apply('nebula.info-broker')
         project.pluginManager.apply('nebula.info-basic')
         project.pluginManager.apply('nebula.info-java')
         project.pluginManager.apply('nebula.info-scm')
         project.pluginManager.apply('nebula.info-jar')
-        project.pluginManager.apply('com.bmuschko.nexus')
         project.pluginManager.apply(ProvidedBasePlugin)
 
         globalBuildInfo(project)
@@ -68,6 +69,9 @@ class BuildPlugin implements Plugin<Project> {
         configureConfigurations(project)
         project.ext.versions = VersionProperties.versions
         configureCompile(project)
+        configureJavadocJar(project)
+        configureSourcesJar(project)
+        configurePomGeneration(project)
 
         configureTest(project)
         configurePrecommit(project)
@@ -109,7 +113,7 @@ class BuildPlugin implements Plugin<Project> {
             }
 
             // enforce gradle version
-            GradleVersion minGradle = GradleVersion.version('2.8')
+            GradleVersion minGradle = GradleVersion.version('2.13')
             if (GradleVersion.current() < minGradle) {
                 throw new GradleException("${minGradle} or above is required to build elasticsearch")
             }
@@ -139,7 +143,7 @@ class BuildPlugin implements Plugin<Project> {
             }
 
             project.rootProject.ext.javaHome = javaHome
-            project.rootProject.ext.javaVersion = javaVersion
+            project.rootProject.ext.javaVersion = javaVersionEnum
             project.rootProject.ext.buildChecksDone = true
         }
         project.targetCompatibility = minimumJava
@@ -228,7 +232,7 @@ class BuildPlugin implements Plugin<Project> {
      */
     static void configureConfigurations(Project project) {
         // we are not shipping these jars, we act like dumb consumers of these things
-        if (project.path.startsWith(':test:fixtures')) {
+        if (project.path.startsWith(':test:fixtures') || project.path == ':build-tools') {
             return
         }
         // fail on any conflicting dependency versions
@@ -263,48 +267,6 @@ class BuildPlugin implements Plugin<Project> {
         project.configurations.compile.dependencies.all(disableTransitiveDeps)
         project.configurations.testCompile.dependencies.all(disableTransitiveDeps)
         project.configurations.provided.dependencies.all(disableTransitiveDeps)
-
-        // add exclusions to the pom directly, for each of the transitive deps of this project's deps
-        project.modifyPom { MavenPom pom ->
-            pom.withXml { XmlProvider xml ->
-                // first find if we have dependencies at all, and grab the node
-                NodeList depsNodes = xml.asNode().get('dependencies')
-                if (depsNodes.isEmpty()) {
-                    return
-                }
-
-                // check each dependency for any transitive deps
-                for (Node depNode : depsNodes.get(0).children()) {
-                    String groupId = depNode.get('groupId').get(0).text()
-                    String artifactId = depNode.get('artifactId').get(0).text()
-                    String version = depNode.get('version').get(0).text()
-
-                    // collect the transitive deps now that we know what this dependency is
-                    String depConfig = transitiveDepConfigName(groupId, artifactId, version)
-                    Configuration configuration = project.configurations.findByName(depConfig)
-                    if (configuration == null) {
-                        continue // we did not make this dep non-transitive
-                    }
-                    Set<ResolvedArtifact> artifacts = configuration.resolvedConfiguration.resolvedArtifacts
-                    if (artifacts.size() <= 1) {
-                        // this dep has no transitive deps (or the only artifact is itself)
-                        continue
-                    }
-
-                    // we now know we have something to exclude, so add the exclusion elements
-                    Node exclusions = depNode.appendNode('exclusions')
-                    for (ResolvedArtifact transitiveArtifact : artifacts) {
-                        ModuleVersionIdentifier transitiveDep = transitiveArtifact.moduleVersion.id
-                        if (transitiveDep.group == groupId && transitiveDep.name == artifactId) {
-                            continue; // don't exclude the dependency itself!
-                        }
-                        Node exclusion = exclusions.appendNode('exclusion')
-                        exclusion.appendNode('groupId', transitiveDep.group)
-                        exclusion.appendNode('artifactId', transitiveDep.name)
-                    }
-                }
-            }
-        }
     }
 
     /** Adds repositores used by ES dependencies */
@@ -317,10 +279,6 @@ class BuildPlugin implements Plugin<Project> {
             repos.mavenLocal()
         }
         repos.mavenCentral()
-        repos.maven {
-            name 'sonatype-snapshots'
-            url 'http://oss.sonatype.org/content/repositories/snapshots/'
-        }
         String luceneVersion = VersionProperties.lucene
         if (luceneVersion.contains('-snapshot')) {
             // extract the revision number from the version with a regex matcher
@@ -328,6 +286,79 @@ class BuildPlugin implements Plugin<Project> {
             repos.maven {
                 name 'lucene-snapshots'
                 url "http://s3.amazonaws.com/download.elasticsearch.org/lucenesnapshots/${revision}"
+            }
+        }
+    }
+
+    /**
+     * Returns a closure which can be used with a MavenPom for fixing problems with gradle generated poms.
+     *
+     * <ul>
+     *     <li>Remove transitive dependencies (using wildcard exclusions, fixed in gradle 2.14)</li>
+     *     <li>Set compile time deps back to compile from runtime (known issue with maven-publish plugin)
+     * </ul>
+     */
+    private static Closure fixupDependencies(Project project) {
+        // TODO: remove this when enforcing gradle 2.14+, it now properly handles exclusions
+        return { XmlProvider xml ->
+            // first find if we have dependencies at all, and grab the node
+            NodeList depsNodes = xml.asNode().get('dependencies')
+            if (depsNodes.isEmpty()) {
+                return
+            }
+
+            // check each dependency for any transitive deps
+            for (Node depNode : depsNodes.get(0).children()) {
+                String groupId = depNode.get('groupId').get(0).text()
+                String artifactId = depNode.get('artifactId').get(0).text()
+                String version = depNode.get('version').get(0).text()
+
+                // fix deps incorrectly marked as runtime back to compile time deps
+                // see https://discuss.gradle.org/t/maven-publish-plugin-generated-pom-making-dependency-scope-runtime/7494/4
+                boolean isCompileDep = project.configurations.compile.allDependencies.find { dep ->
+                    dep.name == depNode.artifactId.text()
+                }
+                if (depNode.scope.text() == 'runtime' && isCompileDep) {
+                    depNode.scope*.value = 'compile'
+                }
+
+                // collect the transitive deps now that we know what this dependency is
+                String depConfig = transitiveDepConfigName(groupId, artifactId, version)
+                Configuration configuration = project.configurations.findByName(depConfig)
+                if (configuration == null) {
+                    continue // we did not make this dep non-transitive
+                }
+                Set<ResolvedArtifact> artifacts = configuration.resolvedConfiguration.resolvedArtifacts
+                if (artifacts.size() <= 1) {
+                    // this dep has no transitive deps (or the only artifact is itself)
+                    continue
+                }
+
+                // we now know we have something to exclude, so add a wildcard exclusion element
+                Node exclusion = depNode.appendNode('exclusions').appendNode('exclusion')
+                exclusion.appendNode('groupId', '*')
+                exclusion.appendNode('artifactId', '*')
+            }
+        }
+    }
+
+    /**Configuration generation of maven poms. */
+    public static void configurePomGeneration(Project project) {
+        project.plugins.withType(MavenPublishPlugin.class).whenPluginAdded {
+            project.publishing {
+                publications {
+                    all { MavenPublication publication -> // we only deal with maven
+                        // add exclusions to the pom directly, for each of the transitive deps of this project's deps
+                        publication.pom.withXml(fixupDependencies(project))
+                    }
+                }
+            }
+
+            project.tasks.withType(GenerateMavenPom.class) { GenerateMavenPom t ->
+                // place the pom next to the jar it is for
+                t.destination = new File(project.buildDir, "distributions/${project.archivesBaseName}-${project.version}.pom")
+                // build poms with assemble
+                project.assemble.dependsOn(t)
             }
         }
     }
@@ -341,27 +372,65 @@ class BuildPlugin implements Plugin<Project> {
                 options.fork = true
                 options.forkOptions.executable = new File(project.javaHome, 'bin/javac')
                 options.forkOptions.memoryMaximumSize = "1g"
+                if (project.targetCompatibility >= JavaVersion.VERSION_1_8) {
+                    // compile with compact 3 profile by default
+                    // NOTE: this is just a compile time check: does not replace testing with a compact3 JRE
+                    if (project.compactProfile != 'full') {
+                        options.compilerArgs << '-profile' << project.compactProfile
+                    }
+                }
                 /*
                  * -path because gradle will send in paths that don't always exist.
                  * -missing because we have tons of missing @returns and @param.
                  * -serial because we don't use java serialization.
                  */
                 // don't even think about passing args with -J-xxx, oracle will ask you to submit a bug report :)
-                options.compilerArgs << '-Werror' << '-Xlint:all,-path,-serial' << '-Xdoclint:all' << '-Xdoclint:-missing'
-                // compile with compact 3 profile by default
-                // NOTE: this is just a compile time check: does not replace testing with a compact3 JRE
-                if (project.compactProfile != 'full') {
-                    options.compilerArgs << '-profile' << project.compactProfile
+                options.compilerArgs << '-Werror' << '-Xlint:all,-path,-serial,-options,-deprecation' << '-Xdoclint:all' << '-Xdoclint:-missing'
+
+                // either disable annotation processor completely (default) or allow to enable them if an annotation processor is explicitly defined
+                if (options.compilerArgs.contains("-processor") == false) {
+                    options.compilerArgs << '-proc:none'
                 }
+
                 options.encoding = 'UTF-8'
                 //options.incremental = true
+
+                if (project.javaVersion == JavaVersion.VERSION_1_9) {
+                    // hack until gradle supports java 9's new "--release" arg
+                    assert minimumJava == JavaVersion.VERSION_1_8
+                    options.compilerArgs << '--release' << '8'
+                    project.sourceCompatibility = null
+                    project.targetCompatibility = null
+                }
             }
         }
     }
 
-    /** Adds additional manifest info to jars */
-    static void configureJarManifest(Project project) {
+    /** Adds a javadocJar task to generate a jar containing javadocs. */
+    static void configureJavadocJar(Project project) {
+        Jar javadocJarTask = project.task('javadocJar', type: Jar)
+        javadocJarTask.classifier = 'javadoc'
+        javadocJarTask.group = 'build'
+        javadocJarTask.description = 'Assembles a jar containing javadocs.'
+        javadocJarTask.from(project.tasks.getByName(JavaPlugin.JAVADOC_TASK_NAME))
+        project.assemble.dependsOn(javadocJarTask)
+    }
+
+    static void configureSourcesJar(Project project) {
+        Jar sourcesJarTask = project.task('sourcesJar', type: Jar)
+        sourcesJarTask.classifier = 'sources'
+        sourcesJarTask.group = 'build'
+        sourcesJarTask.description = 'Assembles a jar containing source files.'
+        sourcesJarTask.from(project.sourceSets.main.allSource)
+        project.assemble.dependsOn(sourcesJarTask)
+    }
+
+    /** Adds additional manifest info to jars, and adds source and javadoc jars */
+    static void configureJars(Project project) {
         project.tasks.withType(Jar) { Jar jarTask ->
+            // we put all our distributable files under distributions
+            jarTask.destinationDir = new File(project.buildDir, 'distributions')
+            // fixup the jar manifest
             jarTask.doFirst {
                 boolean isSnapshot = VersionProperties.elasticsearch.endsWith("-SNAPSHOT");
                 String version = VersionProperties.elasticsearch;
@@ -417,7 +486,7 @@ class BuildPlugin implements Plugin<Project> {
             // default test sysprop values
             systemProperty 'tests.ifNoTests', 'fail'
             // TODO: remove setting logging level via system property
-            systemProperty 'es.logger.level', 'WARN'
+            systemProperty 'tests.logger.level', 'WARN'
             for (Map.Entry<String, String> property : System.properties.entrySet()) {
                 if (property.getKey().startsWith('tests.') ||
                     property.getKey().startsWith('es.')) {
